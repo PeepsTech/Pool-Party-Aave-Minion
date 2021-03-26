@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-pragma solidity 0.7.5;
+
+pragma solidity 0.8.3;
 
 interface IERC20 { // interface for erc20 approve/transfer
     function balanceOf(address who) external view returns (uint256);
@@ -9,23 +10,6 @@ interface IERC20 { // interface for erc20 approve/transfer
     function transferFrom(address from, address to, uint256 value) external returns (bool);
     
     function approve(address spender, uint256 amount) external returns (bool);
-}
-
-library SafeMath { // arithmetic wrapper for unit under/overflow check
-    function mul(uint256 a, uint256 b) internal pure returns (uint256) {
-        if (a == 0) {
-            return 0;
-        }
-        uint256 c = a * b;
-        require(c / a == b);
-        return c;
-    }
-    
-    function div(uint256 a, uint256 b) internal pure returns (uint256) {
-        require(b > 0);
-        uint256 c = a / b;
-        return c;
-    }
 }
 
 
@@ -46,18 +30,39 @@ contract ReentrancyGuard { // call wrapper for reentrancy check
     }
 }
 
-
+/*
+ * @dev Provides information about the current execution context, including the
+ * sender of the transaction and its data. While these are generally available
+ * via msg.sender and msg.data, they should not be accessed in such a direct
+ * manner, since when dealing with meta-transactions the account sending and
+ * paying for execution may not be the actual sender (as far as an application
+ * is concerned).
+ *
+ * This contract is only required for intermediate, library-like contracts.
+ */
 abstract contract Context {
-    function _msgSender() internal view virtual returns (address payable) {
+    function _msgSender() internal view virtual returns (address) {
         return msg.sender;
     }
 
-    function _msgData() internal view virtual returns (bytes memory) {
+    function _msgData() internal view virtual returns (bytes calldata) {
         this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
         return msg.data;
     }
 }
 
+/**
+ * @dev Contract module which provides a basic access control mechanism, where
+ * there is an account (an owner) that can be granted exclusive access to
+ * specific functions.
+ *
+ * By default, the owner account will be the one that deploys the contract. This
+ * can later be changed with {transferOwnership}.
+ *
+ * This module is used through inheritance. It will make available the modifier
+ * `onlyOwner`, which can be applied to your functions to restrict their use to
+ * the owner.
+ */
 abstract contract Ownable is Context {
     address private _owner;
 
@@ -66,7 +71,7 @@ abstract contract Ownable is Context {
     /**
      * @dev Initializes the contract setting the deployer as the initial owner.
      */
-    constructor ()  {
+    constructor () {
         address msgSender = _msgSender();
         _owner = msgSender;
         emit OwnershipTransferred(address(0), msgSender);
@@ -75,7 +80,7 @@ abstract contract Ownable is Context {
     /**
      * @dev Returns the address of the current owner.
      */
-    function owner() public view returns (address) {
+    function owner() public view virtual returns (address) {
         return _owner;
     }
 
@@ -83,7 +88,7 @@ abstract contract Ownable is Context {
      * @dev Throws if called by any account other than the owner.
      */
     modifier onlyOwner() {
-        require(_owner == _msgSender(), "Ownable: caller is not the owner");
+        require(owner() == _msgSender(), "Ownable: caller is not the owner");
         _;
     }
 
@@ -149,37 +154,80 @@ interface IMOLOCH { // brief interface for moloch dao v2
     function withdrawBalance(address token, uint256 amount) external;
 }
 
-
-contract UberHausMinion is Ownable, ReentrancyGuard {
-    using SafeMath for uint256;
+interface ILendingPool {
+    function deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
     
+    function withdraw(address token, uint256 amount, address destination) external;
+    
+    function borrow(address asset, uint256 amount, uint256 interestRateMode, uint16 referralCode, address onBehalfOf) external;
+    
+    function repay(address asset, uint256 amount, uint256 rateMode, address onBehalfOf) external returns (uint256);
+    
+    function getUserAccountData(address user) external view returns (
+        uint256 totalCollateralETH, 
+        uint256 totalDebtETH, 
+        uint256 availableBorrowsETH, 
+        uint256 currentLiquidationThreshold, 
+        uint256 ltv,
+        uint256 healthFactor
+    );
+    
+    function getReservesList() external view returns (address[] memory);
+    
+    function getAssetsPrices(address[] calldata _assets) external view returns(uint256[] memory);
+}
+
+interface IDebtToken {
+    
+    function approveDelegation(address delegatee, uint256 amount) external;
+    
+    function borrowAllowance(address fromUser, address toUser) external view returns (uint256);
+    
+    function mint(
+        address user,
+        address onBehalfOf,
+        uint256 amount,
+        uint256 rate
+    ) external returns (bool);
+    
+    function principalBalanceOf(address user) external view returns (uint256);
+    
+    function getUserStableRate(address user) external view returns (uint256);
+
+    function getAverageStableRate() external view returns (uint256);
+
+    function getSupplyData() external view returns (uint256, uint256, uint256, uint40);
+    
+    function scaledBalanceOf(address user) external view returns (uint256);
+    
+    function getScaledUserBalanceAndSupply(address user) external view returns (uint256, uint256);
+    
+    function scaledTotalSupply() external view returns (uint256);
+    
+}
+
+
+contract PoolPartyAaveMinion is Ownable, ReentrancyGuard {
+
     IMOLOCH public moloch;
     IERC20 public haus;
     
     address public dao; // dao that manages minion 
-    address public uberHaus; // address of uberHaus 
-    address public controller; // address of person who can update uberHaus (for pre-UH minions)
-    address[] public delegateList; // list of child dao delegates
-    address public currentDelegate; // current delegate 
-    address public initialDelegate; // initial delegate if set at summoning
-    uint256 public delegateRewardsFactor; // percent of HAUS given to delegates 
+    address public aave; // Aave address
+    address public feeAddress; //address for collecting fees
     uint256 public minionId; // ID to keep minions straight
+    uint256 public feeFactor; // Fee Factor in BPs
     string public desc; //description of minion
     bool private initialized; // internally tracks deployment under eip-1167 proxy pattern
-    bool private initialDelegation; // tracks whether initial delegate has been appointed
-    
-    address public constant REWARDS = address(0xfeed);
-    address public constant HAUS = 0xAb5cC910998Ab6285B4618562F1e17f3728af662; //0xb0C5f3100A4d9d9532a4CfD68c55F1AE8da987Eb; xDAI HAUS token address 
-    uint256 public constant DIVIDER = 1000;
 
     mapping(uint256 => Action) public actions; // proposalId => Action
-    mapping(uint256 => Appointment) public appointments; // proposalId => Appointment
-    mapping(address => Delegate) public delegates; // delegates of child dao
-    mapping(address => mapping(address => uint256)) public userTokenBalances;
+    mapping(uint256 => Funding) public fundings; // proposalId => Funding
+    mapping(address => uint256) public deposits; // deposits to aave by token
+    mapping(address => uint256) public loans; // loans taken out
+    mapping(address => mapping(address => uint256)) public userDelegationAllowances;
 
     
     struct Action {
-        address dao;
         uint256 value;
         address token;
         address to;
@@ -188,26 +236,18 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
         bytes data;
     }
     
-    struct Appointment {
-        address dao;
-        address nominee;
-        uint256 retireTime;
+    struct Funding {
+        address token;
+        uint256 paymentRequested;
         address proposer;
         bool executed;
     }
     
-    struct Delegate {
-        bool rewarded;
-        bool serving; 
-        bool impeached; 
-    }
-    
 
     event ProposeAction(uint256 proposalId, address proposer);
-    event ProposeAppointment(uint256 proposalId, address proposer, address nominee, uint256 retireTime);
+    event ProposeFunding(uint256 proposalId, address proposer, address token, uint256 paymentRequested);
     event ExecuteAction(uint256 proposalId, address executor);
-    event DelegateAppointed(uint256 proposalId, address executor, address currentDelegate);
-    event Impeachment(address delegate, address impeacher);
+    event FundingExecuted(uint256 proposalId, address executor, address token, uint256 paymentWithdrawn);
     event DoWithdraw(address targetDao, address token, uint256 amount);
     event HausWithdraw(address token, uint256 amount);
     event PulledFunds(address token, uint256 amount);
@@ -221,10 +261,6 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
         _;
     }
     
-    modifier delegateOnly() {
-        require(delegates[msg.sender].serving == true, "Minion::not delegate");
-        _;
-    }
     
     
     /*
@@ -237,44 +273,28 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
     
     function init(
         address _dao, 
-        address _uberHaus, 
-        address _controller,
-        address _initialDelegate,
-        uint256 _delegateRewardFactor,
+        address _aave,
+        address _feeAddress,
         uint256 _minionId,
+        uint256 _feeFactor,
         string memory _desc
     )  public {
         require(_dao != address(0), "no 0x address");
         require(!initialized, "already initialized");
-        
+
         moloch = IMOLOCH(_dao);
-        haus = IERC20(HAUS);
         dao = _dao;
-        uberHaus = _uberHaus;
-        controller = _controller;
-        currentDelegate = _initialDelegate;
-        initialDelegate = _initialDelegate;
-        delegateRewardsFactor = _delegateRewardFactor;
+        aave = _aave;
+        feeAddress = _feeAddress;
         minionId = _minionId;
+        feeFactor = _feeFactor;
         desc = _desc;
         initialized = true; 
-        
-        require(isMember(_initialDelegate), "delegate !member");
-
-        delegates[_initialDelegate] = Delegate(false, true, false);
-        delegateList.push(_initialDelegate);
-        
-        // Approve HAUS if UberHaus has been summonned
-        if(uberHaus != address(0)){
-            haus.approve(uberHaus, uint256(-1));
-        }
-        
-        initialized = true;
     }
     
     //  -- Withdraw Functions --
 
-    function doWithdraw(address targetDao, address token, uint256 amount) external memberOnly {
+    function doWithdraw(address targetDao, address token, uint256 amount) public memberOnly {
         // Withdraws funds from any Moloch (incl. UberHaus or the minion owner DAO) into this Minion
         require(IMOLOCH(targetDao).getUserTokenBalance(address(this), token) >= amount, "user balance < amount");
         IMOLOCH(targetDao).withdrawBalance(token, amount); // withdraw funds from DAO
@@ -282,7 +302,7 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
     }
     
     
-    function pullGuildFunds(address token, uint256 amount) external delegateOnly {
+    function pullGuildFunds(address token, uint256 amount) external memberOnly {
         // Pulls tokens from the Minion into its master moloch 
         require(moloch.tokenWhitelist(token), "token !whitelisted by master dao");
         require(IERC20(token).balanceOf(address(this)) >= amount, "amount > balance");
@@ -290,27 +310,10 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
         emit PulledFunds(token, amount);
     }
     
-    function claimDelegateReward() external delegateOnly nonReentrant {
-        // Allows delegate to claim rewards once during term
-        Delegate memory del = delegates[currentDelegate];
-        
-        require(!del.impeached, "delegate impeached");
-        require(del.serving, "delegate not serving");
-        require(!del.rewarded, "delegate already rewarded");
-        
-        uint256 hausBalance = haus.balanceOf(address(this));
-        uint256 rewards = hausBalance.mul(delegateRewardsFactor).div(DIVIDER);
-        
-        haus.transfer(address(currentDelegate), rewards);
-        delegates[currentDelegate].rewarded = true;
-
-        emit RewardsClaimed(currentDelegate, rewards);
-    }
     
     //  -- Proposal Functions --
     
     function proposeAction(
-        address targetDao, // defaults to childDAO
         address actionTo,
         address token,
         uint256 actionValue,
@@ -321,7 +324,7 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
         // the proposal without getting the proposal struct from parent moloch
         require(actionTo != address(0), "invalid actionTo");
 
-        uint256 proposalId = IMOLOCH(targetDao).submitProposal(
+        uint256 proposalId = moloch.submitProposal(
             address(this),
             0,
             0,
@@ -333,7 +336,6 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
         );
 
         Action memory action = Action({
-            dao: targetDao,
             value: actionValue,
             token: token,
             to: actionTo,
@@ -352,7 +354,7 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
 
     function executeAction(uint256 proposalId) external returns (bytes memory) {
         Action storage action = actions[proposalId];
-        bool[6] memory flags = IMOLOCH(action.dao).getProposalFlags(proposalId);
+        bool[6] memory flags = moloch.getProposalFlags(proposalId);
 
         require(action.to != address(0), "invalid proposalId");
         require(!action.executed, "action executed");
@@ -366,58 +368,51 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
         return retData;
     }
     
-    function nominateDelegate(
-        address targetDao, //default would be UberHaus  
-        address nominee,
-        uint256 retireTime,
+    function fundMinion(
+        address token,
+        uint256 paymentRequested,
         string calldata details
     ) external memberOnly returns (uint256) {
         // No calls to zero address allows us to check that proxy submitted
         // the proposal without getting the proposal struct from parent moloch
-        require(targetDao != address(0), "invalid actionTo");
-
-        uint256 proposalId = IMOLOCH(moloch).submitProposal(
+        uint256 proposalId = moloch.submitProposal(
             address(this),
             0,
             0,
             0,
-            HAUS, // includes whitelisted token to avoid errors on DAO end
-            0,
-            HAUS,
+            token, // includes whitelisted token to avoid errors on DAO end
+            paymentRequested,
+            token,
             details
         );
 
-        Appointment memory appointment = Appointment({
-            dao: targetDao, 
-            nominee: nominee,
-            retireTime: retireTime,
-            proposer: msg.sender,
-            executed: false
+        Funding memory funding = Funding({
+        token: token,
+        paymentRequested: paymentRequested,
+        proposer: msg.sender,
+        executed: false
         });
 
-        appointments[proposalId] = appointment;
+        fundings[proposalId] = funding;
 
-        emit ProposeAppointment(proposalId, msg.sender, nominee, retireTime);
+        emit ProposeFunding(proposalId, msg.sender, token, paymentRequested);
         return proposalId;
     }
 
-    function executeAppointment(uint256 proposalId) external returns (address) {
-        Appointment storage appointment = appointments[proposalId];
-        bool[6] memory flags = IMOLOCH(moloch).getProposalFlags(proposalId);
+    function executeFunding(uint256 proposalId) external returns (uint256) {
+        Funding storage funding = fundings[proposalId];
+        bool[6] memory flags = moloch.getProposalFlags(proposalId);
 
-        require(appointment.dao != address(0), "invalid delegation address");
-        require(!appointment.executed, "appointment already executed");
+        require(!funding.executed, "appointment already executed");
         require(flags[2], "proposal not passed");
 
         // execute call
-        appointment.executed = true;
-        IMOLOCH(appointment.dao).updateDelegateKey(appointment.nominee);
-        delegates[appointment.nominee] = Delegate(false, true, false);
-        delegateList.push(appointment.nominee);
-        currentDelegate = appointment.nominee;
+        funding.executed = true;
+        doWithdraw(address(moloch), funding.token, funding.paymentRequested);
+
         
-        emit DelegateAppointed(proposalId, msg.sender, appointment.nominee);
-        return appointment.nominee;
+        emit FundingExecuted(proposalId, msg.sender, funding.token, funding.paymentRequested);
+        return funding.paymentRequested;
     }
     
     function cancelAction(uint256 _proposalId, uint8 _type) external {
@@ -426,60 +421,22 @@ contract UberHausMinion is Ownable, ReentrancyGuard {
             require(msg.sender == action.proposer, "not proposer");
             delete actions[_proposalId];
         } else if (_type == 2){
-            Appointment storage appointment = appointments[_proposalId];
-            require(msg.sender == appointment.proposer, "not proposer");
-            delete appointments[_proposalId];
+            Funding storage funding = fundings[_proposalId];
+            require(msg.sender == funding.proposer, "not proposer");
+            delete fundings[_proposalId];
         } 
         
         emit Canceled(_proposalId, _type);
         moloch.cancelProposal(_proposalId);
     }
 
-    
-    //  -- Emergency Functions --
-    
-    function impeachDelegate(address delegate) external memberOnly {
-        require(!delegates[currentDelegate].impeached, "already impeached");
-        delegates[currentDelegate].impeached = true; 
-        IMOLOCH(uberHaus).updateDelegateKey(address(this));
-        
-        emit Impeachment(delegate, msg.sender);
-    }
-    
-    
-    //  -- Helper Functions --
-    
-    function approveUberHaus() external memberOnly {
-        // function to make it easier for DAOs to join uberHaus without having to first do a proposal to approve uberHaus to spend HAUS
-        require(uberHaus != address(0), "no uberhaus set");
-        uint256 wad = haus.balanceOf(address(this));
-        haus.approve(uberHaus, wad);
-    }
-    
+
     
     function isMember(address user) public view returns (bool) {
         (, uint shares,,,,) = moloch.members(user);
         return shares > 0;
     }
     
-    function updateUberHaus(address _uberHaus) external returns (address) {
-        // limited admin function to update uberHaus address once
-        // @Dev meant for setting up genesis members
-        require(msg.sender == controller, "only controller");
-        require(uberHaus == address(0), "already updated");
-        uberHaus = _uberHaus;
-        
-        emit SetUberHaus(uberHaus);
-        return uberHaus;
-    }
-    
-    function setInitialDelegate() public {
-        require(uberHaus != address(0), "uberHaus !set");
-        require(!initialDelegation, "already set");
-        require(initialDelegate == currentDelegate, "new delegate"); 
-        IMOLOCH(uberHaus).updateDelegateKey(initialDelegate);
-        initialDelegation == true;
-    }
 }
 
 /*
@@ -521,11 +478,11 @@ contract UberHausMinionFactory is CloneFactory {
     
     address public owner; 
     address immutable public template; // fixed template for minion using eip-1167 proxy pattern
-    address[] public uberMinions; // list of the minions 
+    address[] public aavePartyMinions; // list of the minions 
     uint256 public counter; // counter to prevent overwriting minions
     mapping(address => mapping(uint256 => address)) public ourMinions; //mapping minions to DAOs;
     
-    event SummonUberMinion(address indexed uberminion, address indexed dao, address uberHaus, address controller, address initialDelegate, uint256 delegateRewardFactor, uint256 minionId, string desc, string name);
+    event SummonAavePartyMinion(address AavePartyMinion, address dao, address aave, address feeAddress, uint256 minionId, uint256 feeFactor, string desc, string name);
     
     constructor(address _template)  {
         template = _template;
@@ -533,22 +490,29 @@ contract UberHausMinionFactory is CloneFactory {
     }
     
 
-    function summonUberHausMinion(address _dao, address _uberHaus, address _controller, address _initialDelegate, uint256 _delegateRewardFactor, string memory _desc) external returns (address) {
+    function summonUberHausMinion(
+            address _dao, 
+            address _aave,
+            address _feeAddress,
+            uint256 _minionId,
+            uint256 _feeFactor,
+            string memory _desc) 
+    external returns (address) {
         require(isMember(_dao) || msg.sender == owner, "!member and !owner");
         
-        string memory name = "UberHaus minion";
+        string memory name = "Aave Party Minion";
         uint256 _minionId = counter ++;
-        UberHausMinion uberminion = UberHausMinion(createClone(template));
-        uberminion.init(_dao, _uberHaus, _controller, _initialDelegate, _delegateRewardFactor, _minionId, _desc);
+        PoolPartyAaveMinion aaveparty = PoolPartyAaveMinion(createClone(template));
+        aaveparty.init(_dao, _aave, _feeAddress, _minionId, _feeFactor, _desc);
         
-        emit SummonUberMinion(address(uberminion), _dao, _uberHaus, _controller, _initialDelegate, _delegateRewardFactor, _minionId, _desc, name);
+        emit SummonAavePartyMinion(address(aaveparty), _dao, _aave, _feeAddress, _minionId, _feeFactor, _desc, name);
         
         // add new minion to array and mapping
-        uberMinions.push(address(uberminion));
+        aavePartyMinions.push(address(aaveparty));
         // @Dev summoning a new minion for a DAO updates the mapping 
-        ourMinions[_dao][_minionId] = address(uberminion); 
+        ourMinions[_dao][_minionId] = address(aaveparty); 
         
-        return(address(uberminion));
+        return(address(aaveparty));
     }
     
     function isMember(address _dao) internal view returns (bool) {
@@ -563,16 +527,3 @@ contract UberHausMinionFactory is CloneFactory {
     }
     
 }
-
-
-
-    
-    
-    
-
-
-
-
-
-
-
