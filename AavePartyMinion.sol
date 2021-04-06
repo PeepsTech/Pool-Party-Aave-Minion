@@ -123,8 +123,7 @@ abstract contract Ownable is Context {
 contract PoolPartyAaveMinion is ReentrancyGuard {
 
     IMOLOCH public moloch;
-    IERC20 public haus;
-    
+
     ILendingPoolAddressesProvider provider = ILendingPoolAddressesProvider(address(AaveAddressProvider));
     IProtocolDataProvider data = IProtocolDataProvider(address(aaveData));
     ILendingPool pool = ILendingPool(aavePool);
@@ -137,6 +136,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     uint256 public feeFactor; // Fee Factor in BPs
     uint256 public minHealthFactor; // Minimum health factor for borrowing
     string public desc; //description of minion
+    bool public rewardsOn; // allow members to take out yeild 
     bool private initialized; // internally tracks deployment under eip-1167 proxy pattern
     
     address public constant AaveAddressProvider = 0x88757f2f99175387aB4C6a4b3067c77A695b0349; //Kovan address 
@@ -146,7 +146,9 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     mapping(uint256 => Loan) public loans; // loans taken out
     mapping(address => uint256) public assets; // deposits to aave by token
     mapping(address => uint256) public liabilities; // funds borrowed 
+    
     mapping(address => mapping(address => uint256)) public userDelegationAllowances;
+    mapping(address => mapping(address => uint256)) public aTokenRedemptions; // tracks rewards taken out by users by token
 
     
     struct Action {
@@ -553,6 +555,13 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
     }
     
+    // -- Member Functions --
+    function withdrawMyEarnings(address token, address destination) external memberOnly returns (uint256) {
+     //TODO finish earnings withdraw 
+    }
+    
+    
+    
     
     //  -- View Functions --
     
@@ -595,14 +604,36 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     }
     
     function isMember(address user) public view returns (bool) {
-        (, uint shares,,,,) = moloch.members(user);
+        (, uint256 shares,,,,) = moloch.members(user);
         return shares > 0;
     }
     
     //  -- Helper Functions --
     
-    function updateAavePool() public memberOnly returns (address newPool) {
+    /**
+     * Simple function to update the lending pool address 
+     * Can be called by any member of the DAO
+     **/
+     
+    function updateAavePool() external memberOnly returns (address newPool) {
+        address updatedPool = provider.getLendingPool();
+        require (aavePool != updatedPool, "already set");
         
+        aavePool = updatedPool;
+        return aavePool;
+    }
+    
+    /**
+     * Simple function to update the data provider address 
+     * Can be called by any member of the DAO
+     **/
+    
+    function setDataProvider() external memberOnly returns (address dataProvider){
+        address _dataProvider = provider.getAddress("0x1");
+        require(aaveData != _dataProvider, "already set");
+        aaveData = _dataProvider;
+        
+        return aaveData;
     }
     
 }
