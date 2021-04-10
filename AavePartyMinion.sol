@@ -130,6 +130,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         address _feeAddress,
         uint256 _minionId,
         uint256 _feeFactor,
+        uint256 _minHealthFactor,
         string memory _desc
     )  public {
         require(_dao != address(0), "no 0x address");
@@ -142,6 +143,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         feeAddress = _feeAddress;
         minionId = _minionId;
         feeFactor = _feeFactor;
+        minHealthFactor = _minHealthFactor;
         desc = _desc;
         initialized = true; 
         
@@ -577,9 +579,9 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @dev Meant to be called via an action proposal
      **/ 
     
-    function turnOnEarnings() internal returns(bool On) {
-        require(!rewardsOn, "already on");
-        rewardsOn = true;
+    function toggleEarnings(bool toggle) public returns(bool status) {
+        require(msg.sender == address(this), "!allowed");
+        rewardsOn = toggle;
         return rewardsOn;
     }
     
@@ -603,7 +605,22 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     }
     
     function calcMemberEarnings(address token, address user) public view returns (uint256 earnings){
-        //TODO earnings calc for members
+        
+        //Get all the shares and loot inputs for member
+        (, uint256 shares, uint256 loot,,,) = moloch.members(user);
+        uint256 memberSharesAndLoot = shares + loot;
+        
+        //Get all the shares and loot inputs for moloch
+        uint256 molochShares = moloch.getTotalShares();
+        uint256 molochLoot = moloch.getTotalLoot();
+        uint256 molochSharesAndLoot = molochShares + molochLoot;
+        
+        //Get current balance and basis 
+        uint256 currentBalance = fairShare(IERC20(token).balanceOf(address(this)), memberSharesAndLoot, molochSharesAndLoot);
+        uint256 basis = earningsPeg[token] / memberSharesAndLoot * memberSharesAndLoot + aTokenRedemptions[user][token];
+        uint256 _earnings = currentBalance - basis;
+
+        return _earnings;
     }
     
     function isHealthy() public view returns (bool success){
@@ -647,6 +664,20 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     function isMember(address user) public view returns (bool member) {
         (, uint256 shares,,,,) = moloch.members(user);
         return shares > 0;
+    }
+    
+    function fairShare(uint256 balance, uint256 shares, uint256 totalShares) internal pure returns (uint256) {
+        require(totalShares != 0);
+
+        if (balance == 0) { return 0; }
+
+        uint256 prod = balance * shares;
+
+        if (prod / balance == shares) { // no overflow in multiplication above?
+            return prod / totalShares;
+        }
+
+        return (balance / totalShares) * shares;
     }
     
     //  -- Helper Functions --
@@ -730,7 +761,7 @@ contract CloneFactory {
 
 
 
-contract UberHausMinionFactory is CloneFactory {
+contract AavePartyMinionFactory is CloneFactory {
     
     address public owner; 
     address immutable public template; // fixed template for minion using eip-1167 proxy pattern
@@ -752,6 +783,7 @@ contract UberHausMinionFactory is CloneFactory {
             address _aaveData,
             address _feeAddress,
             uint256 _feeFactor,
+            uint256 _minHealthFactor,
             string memory _desc) 
     external returns (address) {
         require(isMember(_dao) || msg.sender == owner, "!member and !owner");
@@ -759,7 +791,7 @@ contract UberHausMinionFactory is CloneFactory {
         string memory name = "Aave Party Minion";
         uint256 minionId = counter ++;
         PoolPartyAaveMinion aaveparty = PoolPartyAaveMinion(createClone(template));
-        aaveparty.init(_dao, _aavePool, _aaveData, _feeAddress, minionId, _feeFactor, _desc);
+        aaveparty.init(_dao, _aavePool, _aaveData, _feeAddress, minionId, _feeFactor, _minHealthFactor, _desc);
         
         emit SummonAavePartyMinion(address(aaveparty), _dao, _aavePool, _aaveData, _feeAddress, minionId, _feeFactor, _desc, name);
         
