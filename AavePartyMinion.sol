@@ -555,9 +555,29 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     }
     
     // -- Earnings Functions --
+    
+    /**
+     * Allows DAO member to withdraw their share of earnings of a particular token
+     * @dev Earnings withdraws need to be turned on by the DAO first 
+     * @dev Destination is restricted to the member or the DAO (if they're feeling generous)
+     * @param token The token with earnings to withdraw
+     * @param destination Where member sends their earnings 
+     **/ 
+     
     function withdrawMyEarnings(address token, address destination) external memberOnly returns (uint256 amount) {
         require(rewardsOn, "rewards !on");
-        //TODO finish earnings withdraw 
+        require(isHealthy(), "!healthy enough");
+        require(destination == msg.sender || destination == address(moloch), "!acceptable destination");
+        
+        //Get earnings and fees
+        uint256 myEarnings = calcMemberEarnings(token, msg.sender);
+        uint256 fees = withdrawFees(token, myEarnings);
+        
+        //Transfer member earnings - fees 
+        uint256 transferAmt = myEarnings - fees;
+        IERC20(token).transfer(destination, transferAmt);
+        
+        return myEarnings;
     }
     
     /**
@@ -577,6 +597,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     /**
      * Simple function to turn rewardsOn
      * @dev Meant to be called via an action proposal
+     * @param toggle Determines whether its on or off 
      **/ 
     
     function toggleEarnings(bool toggle) public returns(bool status) {
@@ -599,10 +620,18 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         uint256 peg = earningsPeg[token]; // earnings peg for that aToken to get base 
         uint256 tokenBalance = IERC20(token).balanceOf(address(this));
         uint256 withdrawPercent = amount / tokenBalance;
-        uint256 _fee = (tokenBalance - peg) * feePercentage *withdrawPercent; 
+        uint256 _fee = (tokenBalance - peg) * feePercentage * withdrawPercent; 
         
         return _fee;
     }
+    
+    /**
+     * Calculates member earnings w/r to a single token  
+     * @dev Member earnings = balance of member's share of aToken in minion - member's share of earnings peg
+     * @dev Adjusted by previous withdraws of the token for earnings 
+     * @param token The address of the aToken 
+     * @param user The amount being withdrawn
+     **/ 
     
     function calcMemberEarnings(address token, address user) public view returns (uint256 earnings){
         
@@ -617,11 +646,16 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         //Get current balance and basis 
         uint256 currentBalance = fairShare(IERC20(token).balanceOf(address(this)), memberSharesAndLoot, molochSharesAndLoot);
-        uint256 basis = earningsPeg[token] / memberSharesAndLoot * memberSharesAndLoot + aTokenRedemptions[user][token];
+        uint256 basis = (earningsPeg[token] / molochSharesAndLoot * memberSharesAndLoot) + aTokenRedemptions[user][token];
         uint256 _earnings = currentBalance - basis;
 
         return _earnings;
     }
+    
+    /**
+     * Checks whether the current health is greater minHealthFactor
+     * @dev Should check transaction's effects on health factor on front-end
+     **/ 
     
     function isHealthy() public view returns (bool success){
         uint256 health = getHealthFactor(address(this));
