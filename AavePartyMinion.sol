@@ -40,8 +40,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     IMOLOCH public moloch;
 
     ILendingPoolAddressesProvider provider = ILendingPoolAddressesProvider(address(AaveAddressProvider));
-    IProtocolDataProvider data = IProtocolDataProvider(address(aaveData));
-    ILendingPool pool = ILendingPool(aavePool);
+    // IProtocolDataProvider data = IProtocolDataProvider(address(aaveData));
+    // ILendingPool pool = ILendingPool(aavePool);
     
     address public dao; // dao that manages minion 
     address public aavePool; // Initial Aave Lending Pool address
@@ -54,8 +54,9 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     bool public rewardsOn; // allow members to take out yeild 
     bool private initialized; // internally tracks deployment under eip-1167 proxy pattern
     
-    address public constant AaveAddressProvider = 0x88757f2f99175387aB4C6a4b3067c77A695b0349; //Kovan address 
-    uint256 public feePercentage = feeFactor * 10**15; // Fee Factor in BPs 1/1000
+    address public constant AaveAddressProvider = 0xd05e3E715d945B59290df0ae8eF85c1BdB684744; // matic
+ 
+    uint256 public feePercentage = feeFactor * (10**15); // Fee Factor in BPs 1/1000
 
     mapping(uint256 => Action) public actions; // proposalId => Action
     mapping(uint256 => Deposit) public deposits; // proposalId => Funding
@@ -115,8 +116,6 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     /**
      * @param _dao The address of the child dao joining UberHaus
-     * @param _aavePool The address of lending pool - 0xe0fba4fc209b4948668006b2be61711b7f465bae (kovan)
-     * @param _aaveData The address of data provider - 0x3c73A5E5785cAC854D468F727c606C07488a29D6 (kovan)
      * @param _feeAddress The address recieving fees
      * @param _minionId Easy id for minion
      * @param _feeFactor Fee in basis points
@@ -125,8 +124,6 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     function init(
         address _dao, 
-        address _aavePool,
-        address _aaveData,
         address _feeAddress,
         uint256 _minionId,
         uint256 _feeFactor,
@@ -138,13 +135,16 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
 
         moloch = IMOLOCH(_dao);
         dao = _dao;
-        aavePool = _aavePool;
-        aaveData = _aaveData;
         feeAddress = _feeAddress;
         minionId = _minionId;
         feeFactor = _feeFactor;
         minHealthFactor = _minHealthFactor;
         desc = _desc;
+        
+        aavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf;
+        aaveData = 0x7551b5D2763519d4e37e8B81929D336De671d46d;
+        
+        
         initialized = true; 
         
     }
@@ -163,6 +163,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         require(isMember(msg.sender) || msg.sender == address(this), "!member or this");
         require(moloch.getUserTokenBalance(address(this), token) >= amount, "user balance < amount");
         moloch.withdrawBalance(token, amount); // withdraw funds from DAO
+        earningsPeg[token] += amount;
         emit DoWithdraw(targetDao, token, amount);
     }
     
@@ -173,19 +174,19 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param amount the amount being withdrawn 
      */ 
     
-    function pullGuildFunds(address token, uint256 amount) internal {
+    function pullGuildFunds(address token, uint256 amount) external memberOnly {
         // Pulls tokens from the Minion into its master moloch 
         require(moloch.tokenWhitelist(token), "token !whitelisted by master dao");
         require(IERC20(token).balanceOf(address(this)) >= amount, "amount > balance");
-        (address aTokenAddress,,) = getAaveTokenAddresses(token);
+        // (address aTokenAddress,,) = getAaveTokenAddresses(token);
         
-        if(aTokenAddress == address(0)){
-            IERC20(token).transfer(address(moloch), amount);
-        } else {
+        // if(aTokenAddress == address(0)){
+        //     IERC20(token).transfer(address(moloch), amount);
+        // } else {
            uint256 feeAmt = withdrawFees(token, amount);
            IERC20(token).transfer(address(moloch), amount - feeAmt);
            earningsPeg[token] -= amount; // lowers earningsPeg since funds are moved into the DAO
-        }
+        // }
         
         emit PulledFunds(token, amount);
     }
@@ -218,10 +219,6 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         // restricts access to members and internal calls
         require(msg.sender == address(this) || isMember(msg.sender), "not authorized");
-        
-        //makes sure that someone can't add wrong action kind
-        if(msg.sender != address(this)){require(kind == 0, "!permitted action kind");}
-        if(msg.sender != address(this)){require(actionFees == 0, "!not fee");}
         
 
         uint256 proposalId = moloch.submitProposal(
@@ -331,19 +328,22 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     function executeEasyDeposit(uint256 proposalId) external memberOnly returns (uint256) {
         Deposit storage deposit = deposits[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
+        (address aToken,,) = getAaveTokenAddresses(deposit.token);
 
         require(!deposit.executed,  "already executed");
         require(flags[2], "proposal not passed");
         require(flags[1], "proposal not processed");
         
-        //
-        if(IERC20(deposit.token).balanceOf(address(this)) < deposit.paymentRequested){
-            doWithdraw(address(moloch), deposit.token, deposit.paymentRequested);
-            earningsPeg[deposit.token] += deposit.paymentRequested; // updates earnings peg
-        }
+        doWithdraw(address(dao), deposit.token, deposit.paymentRequested);
+        require(IERC20(deposit.token).balanceOf(address(this)) >= deposit.paymentRequested, "!enough funds");
         
-        pool.deposit(deposit.token, deposit.paymentRequested, deposit.beneficiary, 0);
+        IERC20(deposit.token).approve(aavePool, type(uint256).max);
+        IERC20(aToken).approve(aavePool, type(uint256).max);
+        ILendingPool(aavePool).deposit(deposit.token, deposit.paymentRequested, deposit.beneficiary, 0);
+        
         assets[deposit.token] += deposit.paymentRequested;
+        earningsPeg[aToken] += deposit.paymentRequested;
+        
 
         // execute call
         deposit.executed = true;
@@ -370,8 +370,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         string calldata details
     ) external memberOnly returns (uint256){
         
-        bytes memory actionData = abi.encode(
-            "function borrow(address asset, uint256 amount, uint256 interestRateMode, uint16 referralCode, address onBehalfOf)",
+        bytes memory actionData = abi.encodeWithSignature(
+            "borrow(address,uint256,uint256,uint16,address)",
             token,
             amount,
             rateMode,
@@ -428,7 +428,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         action.executed = true;
         loan.executed = true;
         
-        liabilities[action.token] -= loan.loanAmount;
+        liabilities[action.token] += loan.loanAmount;
+        earningsPeg[action.token] += loan.loanAmount;
 
         emit LoanExecuted(proposalId, action.token, loan.loanAmount);
         return retData;
@@ -449,12 +450,12 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     function proposeWithdrawCollateral(address token, uint256 amount, address destination, string calldata details) external memberOnly returns(uint256) {
         require(destination == address(moloch) || destination == address(this), "bad destination");
-        uint256 feeAmt = getFees(token, amount);
-        uint256 adjAmt = amount - feeAmt;
-        bytes memory actionData = abi.encode(
-            "function withdraw(address token, uint256 amount, address destination)",
+        // uint256 feeAmt = getFees(token, amount);
+        // uint256 adjAmt = amount - feeAmt;
+        bytes memory actionData = abi.encodeWithSignature(
+            "withdraw(address,uint256,address)",
             token,
-            adjAmt,
+            amount,
             destination
             );
         
@@ -463,7 +464,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             aavePool,
             token,
             0,
-            feeAmt,
+            0,
             actionData,
             details
             );
@@ -484,13 +485,12 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     function proposeRepayLoan(address token, uint256 amount, uint256 rateMode, address onBehalfOf, string calldata details) external memberOnly returns(uint256) {
         
-        bytes memory actionData = abi.encode(
-            "function repay(address token, uint256 amount,uint256 rateMode, address onBehalfOf, string details)",
+        bytes memory actionData = abi.encodeWithSignature(
+            "repay(address,uint256,uint256,address)",
             token,
             amount,
             rateMode,
-            onBehalfOf,
-            details
+            onBehalfOf
             );
         
         uint256 proposalId = proposeAction(
@@ -515,17 +515,21 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     function executeCollateralWithdraw(uint256 proposalId) external memberOnly returns (bytes memory) {
          Action storage action = actions[proposalId];
+         (,address token,uint256 withdrawAmt,) = abi.decode(action.data, (bytes4, address, uint256, address));
+
 
          require(!action.executed, "already executed");
          require(action.kind == 1, "wrong action kind");
          require(isHealthy(), "!healthy enough");
          
+         (address aToken,,) = getAaveTokenAddresses(token);
          (bool success, bytes memory retData) = action.to.call{value: action.value}(action.data);
          require(success, "call failure");
          actions[proposalId].executed = true;
          
-         (,uint256 withdrawAmt,) = abi.decode(action.data, (address, uint256, address));
          assets[action.token] -= withdrawAmt;
+         earningsPeg[aToken] -= withdrawAmt;
+
 
          return retData;
     }
@@ -548,8 +552,9 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
          require(success, "call failure");
          actions[proposalId].executed = true;
          
-         (,uint256 repayAmt,,) = abi.decode(action.data, (address, uint256, uint256, address));
+         (,,uint256 repayAmt,,) = abi.decode(action.data, (bytes4, address, uint256, uint256, address));
          liabilities[action.token] -= repayAmt;
+         earningsPeg[action.token] -= repayAmt;
 
          return retData;
     }
@@ -597,12 +602,17 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     /**
      * Simple function to turn rewardsOn
      * @dev Meant to be called via an action proposal
-     * @param toggle Determines whether its on or off 
      **/ 
     
-    function toggleEarnings(bool toggle) public returns(bool status) {
+    function toggleEarnings() public returns(bool status) {
         require(msg.sender == address(this), "!allowed");
-        rewardsOn = toggle;
+        
+        if (rewardsOn = false){
+            rewardsOn = true;
+        } else {
+            rewardsOn = false;
+        }
+        
         return rewardsOn;
     }
     
@@ -663,7 +673,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     }
     
     function getHealthFactor(address user) public view returns (uint256 healthFactor) {
-        (,,,,,uint256 health) = pool.getUserAccountData(user);
+        (,,,,,uint256 health) = ILendingPool(aavePool).getUserAccountData(user);
         return health;
     }
     
@@ -678,7 +688,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
        uint _stableDebt, 
        uint _variableDebt,,,,
        uint _liquidityRate,, 
-       bool _enableCollateral) = data.getUserReserveData(token, address(this));
+       bool _enableCollateral) = IProtocolDataProvider(aaveData).getUserReserveData(token, address(this));
        
        return (_aTokenBalance, _stableDebt, _variableDebt, _liquidityRate, _enableCollateral);
     }
@@ -690,7 +700,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             
         (address _aToken, 
         address _stableDebtToken, 
-        address _variableDebtToken) = data.getReserveTokensAddresses(token);
+        address _variableDebtToken) = IProtocolDataProvider(aaveData).getReserveTokensAddresses(token);
         
         return (_aToken, _stableDebtToken, _variableDebtToken);
     }
@@ -737,7 +747,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * Can be called by any member of the DAO
      **/
      
-    function updateAavePool() external memberOnly returns (address newPool) {
+    function setAavePool() public returns (address newPool) {
         address updatedPool = provider.getLendingPool();
         require (aavePool != updatedPool, "already set");
         
@@ -750,7 +760,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * Can be called by any member of the DAO
      **/
     
-    function setDataProvider() external memberOnly returns (address dataProvider){
+    function setDataProvider() public returns (address dataProvider){
         address _dataProvider = provider.getAddress("0x1");
         require(aaveData != _dataProvider, "already set");
         aaveData = _dataProvider;
@@ -803,7 +813,7 @@ contract AavePartyMinionFactory is CloneFactory {
     uint256 public counter; // counter to prevent overwriting minions
     mapping(address => mapping(uint256 => address)) public ourMinions; //mapping minions to DAOs;
     
-    event SummonAavePartyMinion(address AavePartyMinion, address dao, address aavePool, address aaveData, address feeAddress, uint256 minionId, uint256 feeFactor, string desc, string name);
+    event SummonAavePartyMinion(address AavePartyMinion, address dao, address feeAddress, uint256 minionId, uint256 feeFactor, string desc, string name);
     
     constructor(address _template)  {
         template = _template;
@@ -813,8 +823,6 @@ contract AavePartyMinionFactory is CloneFactory {
 
     function summonAavePartyMinion(
             address _dao, 
-            address _aavePool,
-            address _aaveData,
             address _feeAddress,
             uint256 _feeFactor,
             uint256 _minHealthFactor,
@@ -825,9 +833,9 @@ contract AavePartyMinionFactory is CloneFactory {
         string memory name = "Aave Party Minion";
         uint256 minionId = counter ++;
         PoolPartyAaveMinion aaveparty = PoolPartyAaveMinion(createClone(template));
-        aaveparty.init(_dao, _aavePool, _aaveData, _feeAddress, minionId, _feeFactor, _minHealthFactor, _desc);
+        aaveparty.init(_dao, _feeAddress, minionId, _feeFactor, _minHealthFactor, _desc);
         
-        emit SummonAavePartyMinion(address(aaveparty), _dao, _aavePool, _aaveData, _feeAddress, minionId, _feeFactor, _desc, name);
+        emit SummonAavePartyMinion(address(aaveparty), _dao, _feeAddress, minionId, _feeFactor, _desc, name);
         
         // add new minion to array and mapping
         aavePartyMinions.push(address(aaveparty));
