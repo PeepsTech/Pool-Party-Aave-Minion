@@ -410,6 +410,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         bool whitelisted = moloch.tokenWhitelist(token);
         require(whitelisted, "not a whitelisted token");
+        IERC20(token).approve(address(moloch), type(uint256).max);
         
         uint256 proposalId = proposeAction(
             token,
@@ -585,8 +586,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         uint256 peg = zero(earningsPeg[token]); // earnings peg for that aToken to get base 
         uint256 tokenBalance = IERC20(token).balanceOf(address(this));
-        uint256 withdrawPercent = amount / tokenBalance;
-        uint256 _fee = (tokenBalance - peg) * (feeFactor / feeBase) * withdrawPercent; 
+        uint256 _fee = (tokenBalance - peg) * feeFactor * amount / feeBase / tokenBalance; 
         
         return _fee;
     }
