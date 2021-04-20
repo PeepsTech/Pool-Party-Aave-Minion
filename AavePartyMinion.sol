@@ -631,7 +631,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             token: token,
             amount: 0,
             actionType: 2,
-            executed: true
+            executed: false
         });
         
         actions[proposalId] = action;
@@ -646,6 +646,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         require(!action.executed, "already executed");
         require(action.actionType == 2, "!right actionType");
         
+        action.executed = true;
         if(!rewardsOn[action.token]){
             rewardsOn[action.token] = true;
             return (action.token, true);
