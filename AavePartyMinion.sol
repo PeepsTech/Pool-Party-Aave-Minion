@@ -178,7 +178,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         uint256 tributeOffered,
         uint256 paymentRequested,
         string memory details
-    ) internal returns (uint256) {
+    ) internal returns (uint256 _proposalId) {
         
         //submit proposal to its moloch 
         uint256 proposalId = moloch.submitProposal(
@@ -207,7 +207,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         address token,
         uint256 paymentRequested,
         string calldata details
-    ) external memberOnly returns (uint256) {
+    ) external memberOnly returns (uint256 _proposalId) {
         
         uint256 proposalId = proposeAction(
             token,
@@ -238,7 +238,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/ 
 
-    function executeCollateralDeposit(uint256 proposalId) external memberOnly returns (uint256) {
+    function executeCollateralDeposit(uint256 proposalId) external memberOnly returns (uint256 _proposalId) {
         Deposit storage deposit = deposits[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         (address aToken,,) = getAaveTokenAddresses(deposit.token);
@@ -279,7 +279,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         uint256 rateMode, 
         address onBehalfOf,
         string calldata details
-    ) external memberOnly returns (uint256){
+    ) external memberOnly returns (uint256 _proposalId){
         
         uint256 proposalId = proposeAction(
             token,
@@ -342,7 +342,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param details Used for proposal details
      **/ 
     
-    function withdrawCollateral(address token, uint256 amount, address destination, string calldata details) external memberOnly returns(uint256) {
+    function withdrawCollateral(address token, uint256 amount, address destination, string calldata details) external memberOnly returns(uint256 _proposalId) {
 
         uint256 proposalId = proposeAction(
             token,
@@ -375,7 +375,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param details Used for proposal details
      **/ 
     
-    function repayLoan(address token, uint256 amount, uint256 rateMode, address onBehalfOf, string calldata details) external memberOnly returns(uint256) {
+    function repayLoan(address token, uint256 amount, uint256 rateMode, address onBehalfOf, string calldata details) external memberOnly returns(uint256 _proposalId) {
         
         uint256 proposalId = proposeAction(
             token,
@@ -408,7 +408,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      **/ 
     
 
-    function daoWithdraw(address token, uint256 amount, string calldata details) external memberOnly returns(uint256) {
+    function daoWithdraw(address token, uint256 amount, string calldata details) external memberOnly returns(uint256 _proposalId) {
         
         bool whitelisted = moloch.tokenWhitelist(token);
         require(whitelisted, "not a whitelisted token");
