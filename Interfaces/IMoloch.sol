@@ -10,9 +10,9 @@ interface IMOLOCH { // brief interface for moloch dao v2
     
     function getProposalFlags(uint256 proposalId) external view returns (bool[6] memory);
     
-    function getTotalLoot() external view returns (uint256); 
+    function totalLoot() external view returns (uint256); 
     
-    function getTotalShares() external view returns (uint256); 
+    function totalShares() external view returns (uint256); 
     
     function getUserTokenBalance(address user, address token) external view returns (uint256);
     
