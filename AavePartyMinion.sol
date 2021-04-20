@@ -506,6 +506,53 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         return repaidAmt;
     }
     
+    /**
+     * Simple function to cancel Aave-related proposals  
+     * @dev Can only be called by proposer
+     * @dev Can only be called if the proposal has not been sponsored in DAO
+     * @param proposalId The id of the proposal to be cancelled
+     * @param propType The type of proposal to be cancelled
+     **/ 
+     
+    function cancelAaveProposal(uint256 proposalId, uint16 propType) external {
+        bool[6] memory flags = moloch.getProposalFlags(proposalId);
+        require(!flags[0], "proposal already sponsored");
+        
+        if(propType == 1){
+            Deposit storage prop = deposits[proposalId];
+            require(msg.sender == prop.proposer, "not proposer");
+        } else if (propType == 2) {
+            Loan storage prop = loans[proposalId];
+            require(msg.sender == prop.proposer, "not proposer");
+        } else if (propType == 3) {
+            CollateralWithdraw storage prop = collateralWithdraws[proposalId];
+            require(msg.sender == prop.proposer, "not proposer");
+        } else if (propType == 4) {
+            LoanRepayment storage prop = loanRepayments[proposalId];
+            require(msg.sender == prop.proposer, "not proposer");
+        }
+        
+        emit Canceled(proposalId, propType);
+        moloch.cancelProposal(proposalId);
+    }
+    
+    /**
+     * Simple function to cancel proposals that use actions
+     * @dev Can only be called by proposer
+     * @dev Can only be called if the proposal has not been sponsored in DAO
+     * @param proposalId The id of the proposal to be cancelled
+     **/ 
+    
+    function undoAction(uint256 proposalId) external memberOnly {
+        
+        Action storage action = actions[proposalId];
+        bool[6] memory flags = moloch.getProposalFlags(proposalId);
+        require(!flags[0], "proposal already sponsored");
+        
+        moloch.cancelProposal(proposalId);
+        emit Canceled(proposalId, action.actionType);
+    }
+    
     
     /**********************************************************************
                              EARNGINS & FEE FUNCTIONS 
@@ -520,7 +567,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      **/ 
      
     function withdrawMyEarnings(address token, address destination) external memberOnly returns (uint256 amount) {
-        
+    
         require(rewardsOn[token], "rewards !on");
         require(isHealthy(), "!healthy enough");
         require(destination == msg.sender || destination == address(moloch), "!acceptable destination");
@@ -589,6 +636,23 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         actions[proposalId] = action;
         return proposalId;
+    }
+    
+     function executeToggleEarnings(uint256 proposalId) external memberOnly returns(address token, bool status) {
+        Action storage action = actions[proposalId];
+        bool[6] memory flags = moloch.getProposalFlags(proposalId);
+        
+        require(flags[2], "proposal not passed");
+        require(!action.executed, "already executed");
+        require(action.actionType == 2, "!right actionType");
+        
+        if(!rewardsOn[action.token]){
+            rewardsOn[action.token] = true;
+            return (action.token, true);
+        } else {
+            rewardsOn[action.token] = false;
+            return (action.token, false);
+        }
     }
     
     /**********************************************************************
@@ -727,10 +791,6 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     //  -- Helper Functions -- //
     
-    function executeAction(uint256 proposalId) external memberOnly {
-        
-    }
-    
     /**
      * Withdraws funds from any Moloch into this Minion
      * Set as an public function to allow for member or this contract to call via proposal
@@ -746,52 +806,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         emit DoWithdraw(targetDao, token, amount);
     }
     
-    /**
-     * Simple function to cancel Aave-related proposals  
-     * @dev Can only be called by proposer
-     * @dev Can only be called if the proposal has not been sponsored in DAO
-     * @param proposalId The id of the proposal to be cancelled
-     * @param propType The type of proposal to be cancelled
-     **/ 
-     
-    function cancelAaveProposal(uint256 proposalId, uint16 propType) external {
-        bool[6] memory flags = moloch.getProposalFlags(proposalId);
-        require(!flags[0], "proposal already sponsored");
-        
-        if(propType == 1){
-            Deposit storage prop = deposits[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
-        } else if (propType == 2) {
-            Loan storage prop = loans[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
-        } else if (propType == 3) {
-            CollateralWithdraw storage prop = collateralWithdraws[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
-        } else if (propType == 4) {
-            LoanRepayment storage prop = loanRepayments[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
-        }
-        
-        emit Canceled(proposalId, propType);
-        moloch.cancelProposal(proposalId);
-    }
-    
-    /**
-     * Simple function to cancel proposals that use actions
-     * @dev Can only be called by proposer
-     * @dev Can only be called if the proposal has not been sponsored in DAO
-     * @param proposalId The id of the proposal to be cancelled
-     **/ 
-    
-    function undoAction(uint256 proposalId) external memberOnly {
-        
-        Action storage action = actions[proposalId];
-        bool[6] memory flags = moloch.getProposalFlags(proposalId);
-        require(!flags[0], "proposal already sponsored");
-        
-        moloch.cancelProposal(proposalId);
-        emit Canceled(proposalId, action.actionType);
-    }
+
     
     /**
      * Simple function to update the lending pool address 
