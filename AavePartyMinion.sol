@@ -110,15 +110,20 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         bool executed;
     }
 
-    event ProposeDeposit(uint256 proposalId, address proposer, address token, uint256 paymentRequested);
-    event DepositExecuted(uint256 proposalId, address token, uint256 aTokens);
-    event ProposeLoan(uint256 proposalId, address proposer, address beneficiary, address token, uint256 loanAmount, uint256 rateMode);
-    event LoanExecuted(uint256 proposalId, address token, uint256 loanAmt);
-    event ExecuteAction(uint256 proposalId, address executor);
-    event DepositExecuted(uint256 proposalId, address executor, address token, uint256 paymentWithdrawn);
-    event DoWithdraw(address targetDao, address token, uint256 amount);
-    event Withdraw2DAO(address token, uint256 amount);
-    event Canceled(uint256 proposalId, uint256 proposalKind);
+    event ProposeDeposit(uint256 proposalId, address proposer, address token, uint256 amount);
+    event DepositExecuted(uint256 proposalId);
+    event ProposeLoan(uint256 proposalId, address proposer, address beneficiary, address token, uint256 amount, uint256 rateMode);
+    event LoanExecuted(uint256 proposalId);
+    event ProposeCollateralWithdraw(uint256 proposalId, address proposer, address token, uint256 amount, address destination);
+    event CollateralWithdrawExecuted(uint256 proposalId);
+    event ProposeRepayLoan(uint256 proposalId, address proposer, address token, uint256 amount, address onBehalfOf);
+    event RepayLoanExecuted(uint256 proposalId);
+    event WithdrawToDAO(uint256 proposalId, address proposer, address token, uint256 amount);
+    event EarningsWithdraw(address member, address token, uint256 earnings, address destination);
+    event ProposeToggleEarnings(address token);
+    event EarningsToggled(uint256 proposalId, bool status);
+    event WithdrawToMinion(address targetDao, address token, uint256 amount);
+    event Canceled(uint256 proposalId, uint256 proposalType, string caller);
 
     
     modifier memberOnly() {
@@ -259,7 +264,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         // execute call
         deposit.executed = true;
         
-        emit DepositExecuted(proposalId, msg.sender, deposit.token, deposit.paymentRequested);
+        emit DepositExecuted(proposalId);
         return deposit.paymentRequested;
     }
     
@@ -325,7 +330,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         earningsPeg[loan.token] += int(loan.amount);
 
-        emit LoanExecuted(proposalId, loan.token, loan.amount);
+        emit LoanExecuted(proposalId);
         return loan.amount;
     }
     
@@ -360,8 +365,9 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         });
 
         collateralWithdraws[proposalId] = withdraw;  
-       
-       return(proposalId);
+        
+        emit ProposeCollateralWithdraw(proposalId, msg.sender, token, amount, destination);
+        return(proposalId);
     }
     
     /**
@@ -394,8 +400,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         });
 
         loanRepayments[proposalId] = repayment; 
-       
-       return(proposalId);
+        emit ProposeRepayLoan(proposalId, msg.sender, token, amount, onBehalfOf);
+        return(proposalId);
     }
     
     /**
@@ -440,6 +446,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         earningsPeg[token] -= int(amount);
         actions[proposalId] = action; 
+        emit WithdrawToDAO(proposalId, msg.sender, token, amount);
         return(proposalId);
     }
     
@@ -473,7 +480,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
          
         // Adjust earnings peg to reflect aTokens converted back into reserveTokens
          earningsPeg[aToken] -= int(withdraw.amount);
-
+         emit CollateralWithdrawExecuted(proposalId);
          return withdrawAmt;
     }
     
@@ -502,7 +509,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         // Adjust earnings peg to reflect debt repaid 
         earningsPeg[repay.token] -= int(repaidAmt);
-
+        emit RepayLoanExecuted(proposalId);
         return repaidAmt;
     }
     
@@ -532,7 +539,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             require(msg.sender == prop.proposer, "not proposer");
         }
         
-        emit Canceled(proposalId, propType);
+        emit Canceled(proposalId, propType, "undoAaveProp");
         moloch.cancelProposal(proposalId);
     }
     
@@ -550,7 +557,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         require(!flags[0], "proposal already sponsored");
         
         moloch.cancelProposal(proposalId);
-        emit Canceled(proposalId, action.actionType);
+        emit Canceled(proposalId, action.actionType, "undoAction");
     }
     
     
@@ -579,7 +586,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         //Transfer member earnings - fees 
         uint256 transferAmt = myEarnings - fees;
         IERC20(token).transfer(destination, uint256(transferAmt));
-        
+        emit EarningsWithdraw(msg.sender, token, transferAmt, destination);
         return myEarnings;
     }
     
@@ -635,6 +642,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         });
         
         actions[proposalId] = action;
+        emit ProposeToggleEarnings(token);
         return proposalId;
     }
     
@@ -649,9 +657,11 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         action.executed = true;
         if(!rewardsOn[action.token]){
             rewardsOn[action.token] = true;
+            emit EarningsToggled(proposalId, true);
             return (action.token, true);
         } else {
             rewardsOn[action.token] = false;
+            emit EarningsToggled(proposalId, false);
             return (action.token, false);
         }
     }
@@ -759,18 +769,18 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     //  -- Moloch-related View Functions -- //
     
-    function isMember(address user) public view returns (bool member) {
+    function isMember(address user) internal view returns (bool member) {
         (, uint256 shares,,,,) = moloch.members(user);
         return shares > 0;
     }
     
-    function getMemberSharesAndLoot(address user) public view returns (uint256){
+    function getMemberSharesAndLoot(address user) internal view returns (uint256){
         (, uint256 shares, uint256 loot,,,) = moloch.members(user);
         return shares + loot;
     }
     
     
-    function getMolochSharesAndLoot() public view returns (uint256){
+    function getMolochSharesAndLoot() internal view returns (uint256){
         uint256 molochShares = moloch.totalShares();
         uint256 molochLoot = moloch.totalLoot();
         return molochShares + molochLoot;
@@ -804,7 +814,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         require(moloch.getUserTokenBalance(address(this), token) >= amount, "user balance < amount");
         moloch.withdrawBalance(token, amount); // withdraw funds from DAO
         earningsPeg[token] += int(amount);
-        emit DoWithdraw(targetDao, token, amount);
+        emit WithdrawToMinion(targetDao, token, amount);
     }
     
 
