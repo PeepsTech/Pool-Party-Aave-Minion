@@ -142,6 +142,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     function init(
         address _dao, 
         address _feeAddress,
+        address _aavePool,
+        address _aaveData,
         uint256 _minionId,
         uint256 _feeFactor,
         uint256 _minHealthFactor,
@@ -158,8 +160,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         minHealthFactor = _minHealthFactor;
         desc = _desc;
         
-        aavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf;
-        aaveData = 0x7551b5D2763519d4e37e8B81929D336De671d46d;
+        aavePool = _aavePool; 
+        aaveData = _aaveData;
         
         initialized = true; 
         
@@ -891,6 +893,10 @@ contract CloneFactory {
 contract AavePartyMinionFactory is CloneFactory {
     
     address public owner; 
+    address aavePool;
+    address aaveData;
+    
+    // Tracking minions
     address immutable public template; // fixed template for minion using eip-1167 proxy pattern
     address[] public aavePartyMinions; // list of the minions 
     uint256 public counter; // counter to prevent overwriting minions
@@ -901,6 +907,8 @@ contract AavePartyMinionFactory is CloneFactory {
     constructor(address _template)  {
         template = _template;
         owner = msg.sender;
+        aavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf;
+        aaveData = 0x7551b5D2763519d4e37e8B81929D336De671d46d;
     }
     
 
@@ -916,7 +924,7 @@ contract AavePartyMinionFactory is CloneFactory {
         string memory name = "Aave Party Minion";
         uint256 minionId = counter ++;
         PoolPartyAaveMinion aaveparty = PoolPartyAaveMinion(createClone(template));
-        aaveparty.init(_dao, _feeAddress, minionId, _feeFactor, _minHealthFactor, _desc);
+        aaveparty.init(_dao, _feeAddress, aavePool, aaveData, minionId, _feeFactor, _minHealthFactor, _desc);
         
         emit SummonAavePartyMinion(address(aaveparty), _dao, _feeAddress, minionId, _feeFactor, _desc, name);
         
@@ -937,6 +945,16 @@ contract AavePartyMinionFactory is CloneFactory {
         require(msg.sender == owner, "only owner");
         owner = _newOwner;
         return owner;
+    }
+    
+    function updatePool(address _newPool) external {
+        require(msg.sender == owner, "only owner");
+        aavePool = _newPool;
+    }
+    
+    function updateData(address _newData) external {
+        require(msg.sender == owner, "only owner");
+        aaveData = _newData;
     }
     
 }
