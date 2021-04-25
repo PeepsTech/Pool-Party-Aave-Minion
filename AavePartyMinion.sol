@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-pragma solidity 0.8.3;
+pragma solidity >=0.8.3;
 
 import "./Interfaces/IMoloch.sol";
 import "./Interfaces/IAave.sol";
@@ -39,26 +39,26 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
 
     IMOLOCH public moloch;
 
-    ILendingPoolAddressesProvider provider = ILendingPoolAddressesProvider(address(AaveAddressProvider));
-    // IProtocolDataProvider data = IProtocolDataProvider(address(aaveData));
-    // ILendingPool pool = ILendingPool(aavePool);
+    ILendingPoolAddressesProvider public provider = ILendingPoolAddressesProvider(address(AAVE_ADDRESS_PROVIDER));
+    IProtocolDataProvider public data = IProtocolDataProvider(address(aaveData));
+    ILendingPool public pool = ILendingPool(aavePool);
     
     address public dao; // dao that manages minion 
     address public aavePool; // Initial Aave Lending Pool address
     address public aaveData; // Initial Aave Data address
-    address public feeAddress; //address for collecting fees
+    address private feeAddress; //address for collecting fees
     
+    uint256 public minionId; //Id to help identify minion
     uint256 public feeFactor; // Fee BPs
-    uint256 public minionId; // ID to keep minions straight
     uint256 public minHealthFactor; // Minimum health factor for borrowing
     uint256[] public proposals; // Array of proposals
     
     string public desc; //description of minion
     bool private initialized; // internally tracks deployment under eip-1167 proxy pattern
     
-    address public constant AaveAddressProvider = 0xd05e3E715d945B59290df0ae8eF85c1BdB684744; // matic
-    uint256 public constant feeBase = 10000; // Fee Factor in BPs 1/10000
-    uint256 public constant withdrawFactor = 10; // Fee 
+    address public constant AAVE_ADDRESS_PROVIDER = 0xd05e3E715d945B59290df0ae8eF85c1BdB684744; // matic
+    uint256 public constant FEE_BASE = 10000; // Fee Factor in BPs 1/10000
+    uint256 public constant WITHDRAW_FACTOR = 10; // Fee 
 
     mapping(uint256 => Deposit) public deposits; // proposalId => Funding
     mapping(uint256 => Loan) public loans; // loans taken out
@@ -81,7 +81,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         address proposer;
         address onBehalfOf;
         uint256 amount;
-        uint256 rateMode;
+        uint256 rateMode; // 1 for stableDebt, 2 for variableDebt
         bool executed;
     }
     
@@ -115,7 +115,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     event ProposeLoan(uint256 proposalId, address proposer, address beneficiary, address token, uint256 amount, uint256 rateMode);
     event LoanExecuted(uint256 proposalId);
     event ProposeCollateralWithdraw(uint256 proposalId, address proposer, address token, uint256 amount, address destination);
-    event CollateralWithdrawExecuted(uint256 proposalId);
+    event CollateralWithdrawExecuted(uint256 proposalId, uint256 amount);
     event ProposeRepayLoan(uint256 proposalId, address proposer, address token, uint256 amount, address onBehalfOf);
     event RepayLoanExecuted(uint256 proposalId);
     event WithdrawToDAO(uint256 proposalId, address proposer, address token, uint256 amount);
@@ -132,10 +132,14 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     }
     
     /**
+     * @dev Takes place of constructor function with EIP-1167
      * @param _dao The address of the child dao joining UberHaus
+     * @param _aavePool The initial AavePool interface address
+     * @param _aaveData The initial AaveDataProvider interface address
+     * @param _minionId Helps to track minion
      * @param _feeAddress The address recieving fees
-     * @param _minionId Easy id for minion
      * @param _feeFactor Fee in basis points
+     * @param _minHealthFactor Minimum Aave Health Factor in Wei 
      * @param _desc Name or description of the minion
      */  
     
@@ -152,10 +156,14 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         require(_dao != address(0), "no 0x address");
         require(!initialized, "already initialized");
 
+        //Set up interfaces
         moloch = IMOLOCH(_dao);
+        pool = ILendingPool(_aavePool);
+        data = IProtocolDataProvider(_aaveData);
+        
         dao = _dao;
-        feeAddress = _feeAddress;
         minionId = _minionId;
+        feeAddress = _feeAddress;
         feeFactor = _feeFactor;
         minHealthFactor = _minHealthFactor;
         desc = _desc;
@@ -172,11 +180,14 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
                              PROPOSAL FUNCTIONS 
     ***********************************************************************/
     
-    // -- Lending and Borrowing Functions -- //
+    // -- LENDING AND BORROWING FUNCTIONS -- //
     
     /**
-     * Creates proposal to the owner DAO to execute an arbitrary function call from the minion
+     * Creates a generic proposal to the DAO to do actions at the minion level
+     * @dev Returns a proposalId which is used by the rest of the functions for tracking proposal status
      * @param token The token being used for the DAO proposal (default is DAO deposit token)
+     * @param tributeOffered Used if the Minion is moving funds into the DAO
+     * @param paymentRequested Used to move funds from DAO to minion
      * @param details Human readable text for the proposal being submitted 
      */ 
     
@@ -185,7 +196,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         uint256 tributeOffered,
         uint256 paymentRequested,
         string memory details
-    ) internal returns (uint256 _proposalId) {
+    ) internal returns (uint256) {
         
         //submit proposal to its moloch 
         uint256 proposalId = moloch.submitProposal(
@@ -198,13 +209,12 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             token,
             details
         );
-
+        
         return proposalId;
     }
 
     /**
      * Special proposal function to make funding the minion via a DAO proposal and moving those funds into Aave easy
-     * @dev Did not use proposeAction() because of stack too deep error when adding paymentRequested
      * @param token The base token to be wrapped in Aave
      * @param paymentRequested Amount of tokens to be requested from 
      * @param details Details for the DAO proposal
@@ -214,7 +224,11 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         address token,
         uint256 paymentRequested,
         string calldata details
-    ) external memberOnly returns (uint256 _proposalId) {
+    ) external memberOnly returns (uint256) {
+        
+        // Checks there's an existing aToken for this token
+        (address aToken,,) = getAaveTokenAddresses(token);
+        require(aToken != address(0), "No aToken");
         
         uint256 proposalId = proposeAction(
             token,
@@ -223,7 +237,6 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             details
             );
 
-        // TODO Add check to make sure token has an aToken 
 
         Deposit memory deposit = Deposit({
             token: token,
@@ -245,7 +258,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/ 
 
-    function executeCollateralDeposit(uint256 proposalId) external memberOnly returns (uint256 _proposalId) {
+    function executeCollateralDeposit(uint256 proposalId) external memberOnly returns (uint256) {
         Deposit storage deposit = deposits[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         (address aToken,,) = getAaveTokenAddresses(deposit.token);
@@ -254,20 +267,23 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         require(flags[2], "proposal not passed");
         require(flags[1], "proposal not processed");
         
+        //Withdraws the funds for deposit from the Moloch
         doWithdraw(address(dao), deposit.token, deposit.paymentRequested);
-        require(IERC20(deposit.token).balanceOf(address(this)) >= deposit.paymentRequested, "!enough funds");
-        
+        //Approves that token to be spent by Aave
         IERC20(deposit.token).approve(aavePool, type(uint256).max);
+        //Also approves the aToken to be used by Aave in anticipation of eventual withdraw
         IERC20(aToken).approve(aavePool, type(uint256).max);
-        ILendingPool(aavePool).deposit(deposit.token, deposit.paymentRequested, address(this), 0);
+        //Deposits token into the AaveLending Pool with the minion as the destination for aTokens
+        pool.deposit(deposit.token, deposit.paymentRequested, address(this), 0);
         
+        //Updates internal accounting for earnings pegs
         earningsPeg[aToken] += int(deposit.paymentRequested);
         
         // execute call
         deposit.executed = true;
         
         emit DepositExecuted(proposalId);
-        return deposit.paymentRequested;
+        return proposalId;
     }
     
     /**
@@ -286,7 +302,19 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         uint256 rateMode, 
         address onBehalfOf,
         string calldata details
-    ) external memberOnly returns (uint256 _proposalId){
+    ) external memberOnly returns (uint256){
+        
+        (,address sToken, address vToken) = getAaveTokenAddresses(token);
+        // Check health before allowing member to propose borrowing more
+        require(isHealthy(), "Not healthy enough");
+        //Check that debtToken exists for that rateMode 
+        if (rateMode == 1){
+            require(sToken != address(0), "no sToken");
+        } else if (rateMode == 2){
+            require(vToken != address(0), "no sToken");
+        } else {
+            revert("no rateMode");
+        }
         
         uint256 proposalId = proposeAction(
             token,
@@ -317,26 +345,29 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/     
     
-    function executeBorrow(uint256 proposalId) external memberOnly returns (uint256 amount){
+    function executeBorrow(uint256 proposalId) external memberOnly returns (uint256){
         Loan storage loan = loans[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         
         require(!loan.executed,  "already executed");
         require(flags[2], "proposal not passed");
         
-        // Checks that health factor is accectable before executing loan
+        /*
+         * Checks that health factor is accectable before executing loan
+         * Health factor could change between proposal and execution
+         */
         require(isHealthy(), "!healthy enough");
         
-        ILendingPool(aavePool).borrow(loan.token, loan.amount, loan.rateMode, 0, loan.onBehalfOf);
+        pool.borrow(loan.token, loan.amount, loan.rateMode, 0, loan.onBehalfOf);
         loan.executed = true;
         
         earningsPeg[loan.token] += int(loan.amount);
 
         emit LoanExecuted(proposalId);
-        return loan.amount;
+        return proposalId;
     }
     
-    //  -- Repayment and Withdraw Functions -- //
+    //  -- REPAYMENT AND WITHDRAW FUNCTIONS -- //
     
     /**
      * Allows minion to withdraw funds from Aave 
@@ -349,8 +380,18 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param details Used for proposal details
      **/ 
     
-    function withdrawCollateral(address token, uint256 amount, address destination, string calldata details) external memberOnly returns(uint256 _proposalId) {
-
+    function withdrawCollateral(
+        address token, 
+        uint256 amount, 
+        address destination, 
+        string calldata details
+    ) external memberOnly returns (uint256) {
+        (uint256 aTokenBal,,,,) = getOurCompactReserveData(token);
+        //Check health before collateral withdraw
+        require(isHealthy(), "not healthy enough");
+        //Check aTokens available is <= amount being withdrawn
+        require(aTokenBal <= amount, "not enough tokens");
+        
         uint256 proposalId = proposeAction(
             token,
             0,
@@ -369,7 +410,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         collateralWithdraws[proposalId] = withdraw;  
         
         emit ProposeCollateralWithdraw(proposalId, msg.sender, token, amount, destination);
-        return(proposalId);
+        return proposalId;
     }
     
     /**
@@ -379,11 +420,17 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param token The underlying token to be withdrawn from Aave 
      * @param amount The amount to be taken out of Aave
      * @param rateMode whether loan uses a stable or variable rate
-     * @param onBehalfOf should typically be minion address 
+     * @param onBehalfOf should be minion address, except in special circumstances
      * @param details Used for proposal details
      **/ 
     
-    function repayLoan(address token, uint256 amount, uint256 rateMode, address onBehalfOf, string calldata details) external memberOnly returns(uint256 _proposalId) {
+    function repayLoan(
+        address token, 
+        uint256 amount, 
+        uint256 rateMode, 
+        address onBehalfOf, 
+        string calldata details
+    ) external memberOnly returns (uint256) {
         
         uint256 proposalId = proposeAction(
             token,
@@ -403,11 +450,11 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
 
         loanRepayments[proposalId] = repayment; 
         emit ProposeRepayLoan(proposalId, msg.sender, token, amount, onBehalfOf);
-        return(proposalId);
+        return proposalId;
     }
     
     /**
-     * Withdraws funds from the minion by tributing them into the DAO via proposal for 0 shares / loot
+     * Withdraws funds from the minion by tributing them into the DAO via proposal for 0 shares / 0 loot
      * @dev can be undone by DAO if they vote down proposal or msg.sender cancels 
      * @dev takes a fee on aTokens withdrawn, since we don't otherwise get that fee
      * @param token The underlying token to be withdrawn from Aave 
@@ -416,15 +463,21 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      **/ 
     
 
-    function daoWithdraw(address token, uint256 amount, string calldata details) external memberOnly returns(uint256 _proposalId) {
-        
-        bool whitelisted = moloch.tokenWhitelist(token);
-        require(whitelisted, "not a whitelisted token");
+    function daoWithdraw(
+        address token, 
+        uint256 amount, 
+        string calldata details
+    ) external memberOnly returns (uint256) {
+        //Checks that token is already whitelisted 
+        require(moloch.tokenWhitelist(token), "not a whitelisted token");
+        //Approves moloch to withdraw the tributed tokens
         IERC20(token).approve(address(moloch), type(uint256).max);
         
-        // Takes smaller fee if aTokens being withdrawn
         uint256 netDraw;
-        if(checkaToken(token)){
+        if (checkaToken(token)){
+            //Checks health before withdraw
+            require(isHealthy(), "not healthy enough");
+            //Pulls smaller withdraw fee
             uint256 fee = pullWithdrawFees(token, amount);  
             netDraw = amount - fee;
         } else {
@@ -446,10 +499,11 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             executed: true
         });
         
+        //Updates accounting for earnings 
         earningsPeg[token] -= int(amount);
         actions[proposalId] = action; 
         emit WithdrawToDAO(proposalId, msg.sender, token, amount);
-        return(proposalId);
+        return proposalId;
     }
     
     /**
@@ -459,20 +513,22 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/ 
     
-    function executeCollateralWithdraw(uint256 proposalId) external memberOnly returns (uint256 amount) {
+    function executeCollateralWithdraw(uint256 proposalId) external memberOnly returns (uint256) {
          
          CollateralWithdraw storage withdraw = collateralWithdraws[proposalId];
          bool[6] memory flags = moloch.getProposalFlags(proposalId);
         
          require(flags[2], "proposal not passed");
          require(!withdraw.executed, "already executed");
-         require(isHealthy(), "!healthy enough");
+         require(isHealthy(), "not healthy enough");
          
+         //Fetchs aToken address
          (address aToken,,) = getAaveTokenAddresses(withdraw.token);
-         uint256 fee = pullEarrningsFees(aToken, withdraw.amount);
+         //Subtracts fees in aTokens
+         uint256 fee = pullEarningsFees(aToken, withdraw.amount);
          uint256 netWithdraw = withdraw.amount - fee;
-
-         uint256 withdrawAmt = ILendingPool(aavePool).withdraw(
+         //Withdraws net amount from Aave into the minion or DAO
+         uint256 withdrawAmt = pool.withdraw(
              withdraw.token, 
              netWithdraw, 
              withdraw.destination
@@ -480,16 +536,15 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
              
          collateralWithdraws[proposalId].executed = true;
          
-        // Adjust earnings peg to reflect aTokens converted back into reserveTokens
+        // Adjust earnings peg for aTokens converted back into reserveTokens
          earningsPeg[aToken] -= int(withdraw.amount);
-         emit CollateralWithdrawExecuted(proposalId);
-         return withdrawAmt;
+         emit CollateralWithdrawExecuted(proposalId, withdrawAmt);
+         return proposalId;
     }
     
     /**
      * Executes the proposeRepayLoan() proposal once it's passed
-     * @dev requires a special processing function in order to track remaning liabilities / assets  
-     * @dev calls the aavePool withdraw() function to swap aTokens for tokens back to the aavePartyMinions
+     * @dev repays loan by sending tokens and having Aave burn dTokens
      * @param proposalId The id of the associated proposal
      **/ 
     
@@ -501,7 +556,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         require(flags[2], "proposal not passed");
         require(!repay.executed, "already executed");
 
-        uint256 repaidAmt = ILendingPool(aavePool).repay(
+        uint256 repaidAmt = pool.repay(
             repay.token, 
             repay.amount, 
             repay.rateMode, 
@@ -527,7 +582,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         require(!flags[0], "proposal already sponsored");
         
-        if(propType == 1){
+        if (propType == 1){
             Deposit storage prop = deposits[proposalId];
             require(msg.sender == prop.proposer, "not proposer");
         } else if (propType == 2) {
@@ -577,17 +632,18 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      
     function withdrawMyEarnings(address token, address destination) external memberOnly returns (uint256 amount) {
     
-        require(rewardsOn[token], "rewards !on");
-        require(isHealthy(), "!healthy enough");
-        require(destination == msg.sender || destination == address(moloch), "!acceptable destination");
+        require(rewardsOn[token], "rewards not on");
+        require(isHealthy(), "not healthy enough");
+        require(destination == msg.sender || destination == address(moloch), "not acceptable destination");
         
         //Get earnings and fees
         uint256 myEarnings = calcMemberEarnings(token, msg.sender);
-        uint256 fees = pullEarrningsFees(token, myEarnings);
+        uint256 fees = pullEarningsFees(token, myEarnings);
         
         //Transfer member earnings - fees 
         uint256 transferAmt = myEarnings - fees;
         IERC20(token).transfer(destination, uint256(transferAmt));
+        
         emit EarningsWithdraw(msg.sender, token, transferAmt, destination);
         return myEarnings;
     }
@@ -599,7 +655,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param amount The amount being withdrawn
      **/ 
      
-    function pullEarrningsFees(address token, uint256 amount) internal returns(uint256 fee) {
+    function pullEarningsFees(address token, uint256 amount) internal returns (uint256) {
+        
         uint256 feeToPull = calcFees(token, amount);
         IERC20(token).transfer(feeAddress, feeToPull);
 
@@ -613,8 +670,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param amount The amount being withdrawn
      **/ 
      
-    function pullWithdrawFees(address token, uint256 amount) internal returns(uint256 fee){
-        uint256 feeToPull = calcFees(token, amount) / withdrawFactor; //lowers fee by factor of 10 
+    function pullWithdrawFees(address token, uint256 amount) internal returns (uint256){
+        uint256 feeToPull = calcFees(token, amount) / WITHDRAW_FACTOR; //lowers fee by factor of 10 
         IERC20(token).transfer(feeAddress, feeToPull);
 
         return feeToPull;
@@ -622,11 +679,10 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     
     /**
-     * Simple function to turn rewardsOn
-     * @dev sumbmits proposal to DAO to toggle 
+     * @notice Simple function to turn rewardsOn for a token
      **/ 
     
-    function proposeToggleEarnings(address token, string memory details) external memberOnly returns(uint256) {
+    function proposeToggleEarnings(address token, string memory details) external memberOnly returns (uint256) {
         
         uint256 proposalId = proposeAction(
             token,
@@ -648,47 +704,55 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         return proposalId;
     }
     
-     function executeToggleEarnings(uint256 proposalId) external memberOnly returns(address token, bool status) {
+     /**
+     * @notice Executes function above when proposal has passed
+     **/
+     
+     function executeToggleEarnings(uint256 proposalId) external memberOnly returns (address, bool) {
         Action storage action = actions[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         
         require(flags[2], "proposal not passed");
         require(!action.executed, "already executed");
         require(action.actionType == 2, "!right actionType");
+        action.executed = true; //Marks as executed
         
-        action.executed = true;
-        if(!rewardsOn[action.token]){
+        if (!rewardsOn[action.token]){
+            //Turns on rewards
             rewardsOn[action.token] = true;
             emit EarningsToggled(proposalId, true);
             return (action.token, true);
         } else {
+            //Turns off rewards, if already on
             rewardsOn[action.token] = false;
             emit EarningsToggled(proposalId, false);
             return (action.token, false);
         }
+        
+        
     }
     
     /**********************************************************************
                              VIEW & HELPER FUNCTIONS 
     ***********************************************************************/
     
-    //  -- Earnings & Fees View Functions -- //
+    //  --EARNINGS AND FEE FUNCTIONS-- //
     
     /**
-     * Simple function to calculate fees   
+     * Calculates base fees   
      * @dev Total earnings = balance of aToken in minion - earnings peg
      * @dev Adjust fee by amt being withdrawn / total balance of aToken in minion
      * @param token The address of the aToken 
      * @param amount The amount being withdrawn
      **/ 
     
-    function calcFees(address token, uint256 amount) public view returns (uint256 fee){
+    function calcFees(address token, uint256 amount) public view returns (uint256) {
         
         uint256 peg = zero(earningsPeg[token]); // earnings peg for that aToken to get base 
         uint256 tokenBalance = IERC20(token).balanceOf(address(this));
-        uint256 _fee = (tokenBalance - peg) * feeFactor * amount / feeBase / tokenBalance; 
+        uint256 fee = (tokenBalance - peg) * feeFactor * amount / FEE_BASE / tokenBalance; 
         
-        return _fee;
+        return fee;
     }
     
     /**
@@ -699,7 +763,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param user The amount being withdrawn
      **/ 
     
-    function calcMemberEarnings(address token, address user) public view returns (uint256 earnings){
+    function calcMemberEarnings(address token, address user) public view returns (uint256) {
         
         //Get all the shares and loot inputs
         uint256 memberSharesAndLoot = getMemberSharesAndLoot(user);
@@ -708,43 +772,43 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         //Get current balance and basis 
         uint256 currentBalance = fairShare(IERC20(token).balanceOf(address(this)), memberSharesAndLoot, molochSharesAndLoot);
         uint256 basis = (zero(earningsPeg[token]) / molochSharesAndLoot * memberSharesAndLoot) + aTokenRedemptions[user][token];
-        uint256 _earnings = currentBalance - basis;
+        uint256 earnings = currentBalance - basis;
 
-        return _earnings;
+        return earnings;
     }
     
     
-    //  -- Aave-related View Functions -- //
+    //  -- AAVE VIEW FUNCTIONS -- //
     
     /**
      * Checks whether the current health is greater minHealthFactor
      * @dev Should check transaction's effects on health factor on front-end
      **/ 
     
-    function isHealthy() public view returns (bool success){
+    function isHealthy() public view returns (bool){
         uint256 health = getHealthFactor(address(this));
         return health > minHealthFactor;
     }
     
-    function getHealthFactor(address user) public view returns (uint256 healthFactor) {
-        (,,,,,uint256 health) = ILendingPool(aavePool).getUserAccountData(user);
-        return health;
+    function getHealthFactor(address user) public view returns (uint256 health) {
+        (,,,,,health) = pool.getUserAccountData(user);
     }
     
     function getOurCompactReserveData(address token) public view returns (
         uint256 aTokenBalance, 
-        uint256 stableDebt, 
-        uint256 variableDebt, 
-        uint256 liquidityRate, 
-        bool usageAsCollateralEnabled){
+        uint256 stableDebt, // interest rate on stable debt
+        uint256 variableDebt, // interest rate on variable debt
+        uint256 liquidityRate, //interest rate being earned
+        bool usageAsCollateralEnabled
+    ){
+    
+       (aTokenBalance, 
+       stableDebt, 
+       variableDebt,,,,
+       liquidityRate,, 
+       usageAsCollateralEnabled
+       ) = data.getUserReserveData(token, address(this));
        
-       (uint _aTokenBalance, 
-       uint _stableDebt, 
-       uint _variableDebt,,,,
-       uint _liquidityRate,, 
-       bool _enableCollateral) = IProtocolDataProvider(aaveData).getUserReserveData(token, address(this));
-       
-       return (_aTokenBalance, _stableDebt, _variableDebt, _liquidityRate, _enableCollateral);
     }
     
     function getAaveTokenAddresses(address token) public view returns (
@@ -752,17 +816,17 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         address stableDebtTokenAddress, 
         address variableDebtTokenAddress) {
             
-        (address _aToken, 
-        address _stableDebtToken, 
-        address _variableDebtToken) = IProtocolDataProvider(aaveData).getReserveTokensAddresses(token);
-        
-        return (_aToken, _stableDebtToken, _variableDebtToken);
+        (aTokenAddress, 
+         stableDebtTokenAddress, 
+         variableDebtTokenAddress
+        ) = data.getReserveTokensAddresses(token);
+
     }
     
     function checkaToken(address token) internal view returns (bool) {
         
         (address aToken,,) = getAaveTokenAddresses(token);
-        if(aToken == address(0)){
+        if (aToken == address(0)){
             return true;
         } else {
             return false;
@@ -771,7 +835,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     //  -- Moloch-related View Functions -- //
     
-    function isMember(address user) internal view returns (bool member) {
+    function isMember(address user) internal view returns (bool) {
         (, uint256 shares,,,,) = moloch.members(user);
         return shares > 0;
     }
@@ -812,11 +876,18 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param amount the amount being withdrawn 
      */ 
     
-    function doWithdraw(address targetDao, address token, uint256 amount) public {
+    function doWithdraw(
+        address targetDao, 
+        address token, 
+        uint256 amount
+    ) public returns (address, uint256){
+        
         require(moloch.getUserTokenBalance(address(this), token) >= amount, "user balance < amount");
         moloch.withdrawBalance(token, amount); // withdraw funds from DAO
         earningsPeg[token] += int(amount);
+        
         emit WithdrawToMinion(targetDao, token, amount);
+        return (token, amount);
     }
     
 
@@ -826,7 +897,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * Can be called by any member of the DAO
      **/
      
-    function resetAavePool() public returns (address newPool) {
+    function resetAavePool() public returns (address) {
         
         address updatedPool = provider.getLendingPool();
         require (aavePool != updatedPool, "already set");
@@ -840,7 +911,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * Can be called by any member of the DAO
      **/
     
-    function resetDataProvider() public returns (address dataProvider){
+    function resetDataProvider() public returns (address){
         
         address _dataProvider = provider.getAddress("0x1");
         require(aaveData != _dataProvider, "already set");
@@ -893,8 +964,8 @@ contract CloneFactory {
 contract AavePartyMinionFactory is CloneFactory {
     
     address public owner; 
-    address aavePool;
-    address aaveData;
+    address public aavePool;
+    address public aaveData;
     
     // Tracking minions
     address immutable public template; // fixed template for minion using eip-1167 proxy pattern
@@ -902,13 +973,13 @@ contract AavePartyMinionFactory is CloneFactory {
     uint256 public counter; // counter to prevent overwriting minions
     mapping(address => mapping(uint256 => address)) public ourMinions; //mapping minions to DAOs;
     
-    event SummonAavePartyMinion(address AavePartyMinion, address dao, address feeAddress, uint256 minionId, uint256 feeFactor, string desc, string name);
+    event SummonAavePartyMinion(address partyAddress, address dao, address protocol, address feeAddress, uint256 minionId, uint256 feeFactor, string desc, string name);
     
     constructor(address _template)  {
         template = _template;
         owner = msg.sender;
-        aavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf;
-        aaveData = 0x7551b5D2763519d4e37e8B81929D336De671d46d;
+        aavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf; // matic address
+        aaveData = 0x7551b5D2763519d4e37e8B81929D336De671d46d; // matic address
     }
     
 
@@ -926,7 +997,7 @@ contract AavePartyMinionFactory is CloneFactory {
         PoolPartyAaveMinion aaveparty = PoolPartyAaveMinion(createClone(template));
         aaveparty.init(_dao, _feeAddress, aavePool, aaveData, minionId, _feeFactor, _minHealthFactor, _desc);
         
-        emit SummonAavePartyMinion(address(aaveparty), _dao, _feeAddress, minionId, _feeFactor, _desc, name);
+        emit SummonAavePartyMinion(address(aaveparty), _dao, aavePool, _feeAddress, minionId, _feeFactor, _desc, name);
         
         // add new minion to array and mapping
         aavePartyMinions.push(address(aaveparty));
