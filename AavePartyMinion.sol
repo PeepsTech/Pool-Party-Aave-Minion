@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-pragma solidity >=0.8.3;
+pragma solidity 0.8.3;
 
 import "./Interfaces/IMoloch.sol";
 import "./Interfaces/IAave.sol";
@@ -123,11 +123,11 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     event ProposeToggleEarnings(address token);
     event EarningsToggled(uint256 proposalId, bool status);
     event WithdrawToMinion(address targetDao, address token, uint256 amount);
-    event Canceled(uint256 proposalId, uint256 proposalType, string caller);
+    event Canceled(uint256 proposalId, uint256 proposalType, string functionCaller);
 
     
     modifier memberOnly() {
-        require(isMember(msg.sender), "Minion::not member");
+        require(isMember(msg.sender), "AP::not member");
         _;
     }
     
@@ -153,8 +153,8 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         uint256 _minHealthFactor,
         string memory _desc
     )  public {
-        require(_dao != address(0), "no 0x address");
-        require(!initialized, "already initialized");
+        require(_dao != address(0), "AP::no 0x address");
+        require(!initialized, "AP::already initialized");
 
         //Set up interfaces
         moloch = IMOLOCH(_dao);
@@ -228,7 +228,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         // Checks there's an existing aToken for this token
         (address aToken,,) = getAaveTokenAddresses(token);
-        require(aToken != address(0), "No aToken");
+        require(aToken != address(0), "AP::No aToken");
         
         uint256 proposalId = proposeAction(
             token,
@@ -258,14 +258,14 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/ 
 
-    function executeCollateralDeposit(uint256 proposalId) external memberOnly returns (uint256) {
+    function executeCollateralDeposit(uint256 proposalId) external nonReentrant memberOnly returns (uint256) {
         Deposit storage deposit = deposits[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         (address aToken,,) = getAaveTokenAddresses(deposit.token);
 
-        require(!deposit.executed,  "already executed");
-        require(flags[2], "proposal not passed");
-        require(flags[1], "proposal not processed");
+        require(!deposit.executed,  "AP::already executed");
+        require(flags[2], "AP::proposal not passed");
+        require(flags[1], "AP::proposal not processed");
         
         //Withdraws the funds for deposit from the Moloch
         doWithdraw(address(dao), deposit.token, deposit.paymentRequested);
@@ -306,14 +306,14 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         (,address sToken, address vToken) = getAaveTokenAddresses(token);
         // Check health before allowing member to propose borrowing more
-        require(isHealthy(), "Not healthy enough");
+        require(isHealthy(), "AP::Not healthy enough");
         //Check that debtToken exists for that rateMode 
         if (rateMode == 1){
-            require(sToken != address(0), "no sToken");
+            require(sToken != address(0), "AP::no sToken");
         } else if (rateMode == 2){
-            require(vToken != address(0), "no sToken");
+            require(vToken != address(0), "AP::no sToken");
         } else {
-            revert("no rateMode");
+            revert("AP::no rateMode");
         }
         
         uint256 proposalId = proposeAction(
@@ -345,22 +345,19 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/     
     
-    function executeBorrow(uint256 proposalId) external memberOnly returns (uint256){
+    function executeBorrow(uint256 proposalId) external nonReentrant memberOnly returns (uint256){
         Loan storage loan = loans[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         
-        require(!loan.executed,  "already executed");
-        require(flags[2], "proposal not passed");
-        
-        /*
-         * Checks that health factor is accectable before executing loan
-         * Health factor could change between proposal and execution
-         */
-        require(isHealthy(), "!healthy enough");
+        require(!loan.executed,  "AP::already executed");
+        require(flags[2], "AP::proposal not passed");
+        // Recheck health factor, which could have changed since proposal
+        require(isHealthy(), "AP::not healthy enough");
         
         pool.borrow(loan.token, loan.amount, loan.rateMode, 0, loan.onBehalfOf);
         loan.executed = true;
         
+        //Update accounting so loan isn't mistaken for earnings
         earningsPeg[loan.token] += int(loan.amount);
 
         emit LoanExecuted(proposalId);
@@ -387,10 +384,10 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         string calldata details
     ) external memberOnly returns (uint256) {
         (uint256 aTokenBal,,,,) = getOurCompactReserveData(token);
-        //Check health before collateral withdraw
-        require(isHealthy(), "not healthy enough");
+        //Check health before collateral withdraw proposal
+        require(isHealthy(), "AP::not healthy enough");
         //Check aTokens available is <= amount being withdrawn
-        require(aTokenBal <= amount, "not enough tokens");
+        require(aTokenBal <= amount, "AP::not enough tokens");
         
         uint256 proposalId = proposeAction(
             token,
@@ -467,16 +464,16 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         address token, 
         uint256 amount, 
         string calldata details
-    ) external memberOnly returns (uint256) {
+    ) external nonReentrant memberOnly returns (uint256) {
         //Checks that token is already whitelisted 
-        require(moloch.tokenWhitelist(token), "not a whitelisted token");
+        require(moloch.tokenWhitelist(token), "AP::not a whitelisted token");
         //Approves moloch to withdraw the tributed tokens
         IERC20(token).approve(address(moloch), type(uint256).max);
         
         uint256 netDraw;
         if (checkaToken(token)){
             //Checks health before withdraw
-            require(isHealthy(), "not healthy enough");
+            require(isHealthy(), "AP::not healthy enough");
             //Pulls smaller withdraw fee
             uint256 fee = pullWithdrawFees(token, amount);  
             netDraw = amount - fee;
@@ -499,7 +496,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             executed: true
         });
         
-        //Updates accounting for earnings 
+        //Updates accounting for earnings, which have moved to the DAO 
         earningsPeg[token] -= int(amount);
         actions[proposalId] = action; 
         emit WithdrawToDAO(proposalId, msg.sender, token, amount);
@@ -513,14 +510,15 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/ 
     
-    function executeCollateralWithdraw(uint256 proposalId) external memberOnly returns (uint256) {
+    function executeCollateralWithdraw(uint256 proposalId) external nonReentrant memberOnly returns (uint256) {
          
          CollateralWithdraw storage withdraw = collateralWithdraws[proposalId];
          bool[6] memory flags = moloch.getProposalFlags(proposalId);
         
-         require(flags[2], "proposal not passed");
-         require(!withdraw.executed, "already executed");
-         require(isHealthy(), "not healthy enough");
+         require(flags[2], "AP::proposal not passed");
+         require(!withdraw.executed, "AP::already executed");
+         // Recheck health factor, which could have changed since proposal
+         require(isHealthy(), "AP::not healthy enough");
          
          //Fetchs aToken address
          (address aToken,,) = getAaveTokenAddresses(withdraw.token);
@@ -548,13 +546,13 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param proposalId The id of the associated proposal
      **/ 
     
-    function executeLoanRepay(uint256 proposalId) external memberOnly returns (uint256 repayAmt) {
+    function executeLoanRepay(uint256 proposalId) external nonReentrant memberOnly returns (uint256) {
         
         LoanRepayment storage repay = loanRepayments[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         
-        require(flags[2], "proposal not passed");
-        require(!repay.executed, "already executed");
+        require(flags[2], "AP::proposal not passed");
+        require(!repay.executed, "AP::already executed");
 
         uint256 repaidAmt = pool.repay(
             repay.token, 
@@ -580,20 +578,20 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      
     function cancelAaveProposal(uint256 proposalId, uint16 propType) external {
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
-        require(!flags[0], "proposal already sponsored");
+        require(!flags[0], "AP::proposal already sponsored");
         
         if (propType == 1){
             Deposit storage prop = deposits[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
+            require(msg.sender == prop.proposer, "AP::not proposer");
         } else if (propType == 2) {
             Loan storage prop = loans[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
+            require(msg.sender == prop.proposer, "AP::not proposer");
         } else if (propType == 3) {
             CollateralWithdraw storage prop = collateralWithdraws[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
+            require(msg.sender == prop.proposer, "AP::not proposer");
         } else if (propType == 4) {
             LoanRepayment storage prop = loanRepayments[proposalId];
-            require(msg.sender == prop.proposer, "not proposer");
+            require(msg.sender == prop.proposer, "AP::not proposer");
         }
         
         emit Canceled(proposalId, propType, "undoAaveProp");
@@ -611,7 +609,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         
         Action storage action = actions[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
-        require(!flags[0], "proposal already sponsored");
+        require(!flags[0], "AP::proposal already sponsored");
         
         moloch.cancelProposal(proposalId);
         emit Canceled(proposalId, action.actionType, "undoAction");
@@ -630,17 +628,19 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
      * @param destination Where member sends their earnings 
      **/ 
      
-    function withdrawMyEarnings(address token, address destination) external memberOnly returns (uint256 amount) {
+    function withdrawMyEarnings(address token, address destination) external nonReentrant memberOnly returns (uint256) {
     
-        require(rewardsOn[token], "rewards not on");
-        require(isHealthy(), "not healthy enough");
+        require(rewardsOn[token], "AP::rewards not on");
+        // Check health before withdrawing earnings, which are likely aTokens
+        require(isHealthy(), "AP::not healthy enough");
+        // Restrict destination to DAO or member for v1
         require(destination == msg.sender || destination == address(moloch), "not acceptable destination");
         
-        //Get earnings and fees
+        // Get earnings and fees
         uint256 myEarnings = calcMemberEarnings(token, msg.sender);
         uint256 fees = pullEarningsFees(token, myEarnings);
         
-        //Transfer member earnings - fees 
+        // Transfer member earnings - fees 
         uint256 transferAmt = myEarnings - fees;
         IERC20(token).transfer(destination, uint256(transferAmt));
         
@@ -679,7 +679,9 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
     
     /**
-     * @notice Simple function to turn rewardsOn for a token
+     * @dev Simple function to turn rewardsOn for a token
+     * @param token The address of the token having its earnings EarningsToggled
+     * @param details Human readable details for the proposal
      **/ 
     
     function proposeToggleEarnings(address token, string memory details) external memberOnly returns (uint256) {
@@ -706,15 +708,16 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     
      /**
      * @notice Executes function above when proposal has passed
+     * @param proposalId of that EarningsToggled proposal
      **/
      
-     function executeToggleEarnings(uint256 proposalId) external memberOnly returns (address, bool) {
+     function executeToggleEarnings(uint256 proposalId) external nonReentrant memberOnly returns (address, bool) {
         Action storage action = actions[proposalId];
         bool[6] memory flags = moloch.getProposalFlags(proposalId);
         
-        require(flags[2], "proposal not passed");
-        require(!action.executed, "already executed");
-        require(action.actionType == 2, "!right actionType");
+        require(flags[2], "AP::proposal not passed");
+        require(!action.executed, "AP::already executed");
+        require(action.actionType == 2, "AP::right actionType");
         action.executed = true; //Marks as executed
         
         if (!rewardsOn[action.token]){
@@ -790,8 +793,9 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         return health > minHealthFactor;
     }
     
-    function getHealthFactor(address user) public view returns (uint256 health) {
-        (,,,,,health) = pool.getUserAccountData(user);
+    function getHealthFactor(address user) public view returns (uint256) {
+        (,,,,, uint256 health) = pool.getUserAccountData(user);
+        return health;
     }
     
     function getOurCompactReserveData(address token) public view returns (
@@ -863,10 +867,10 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             return prod / totalShares;
         }
 
-        return (balance / totalShares) * shares;
+        return shares * balance / totalShares;
     }
     
-    //  -- Helper Functions -- //
+    //  -- HELPER FUNCTIONS -- //
     
     /**
      * Withdraws funds from any Moloch into this Minion
@@ -882,7 +886,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         uint256 amount
     ) public returns (address, uint256){
         
-        require(moloch.getUserTokenBalance(address(this), token) >= amount, "user balance < amount");
+        require(moloch.getUserTokenBalance(address(this), token) >= amount, "AP::user balance < amount");
         moloch.withdrawBalance(token, amount); // withdraw funds from DAO
         earningsPeg[token] += int(amount);
         
@@ -900,7 +904,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     function resetAavePool() public returns (address) {
         
         address updatedPool = provider.getLendingPool();
-        require (aavePool != updatedPool, "already set");
+        require (aavePool != updatedPool, "AP::already set");
         aavePool = updatedPool;
         
         return aavePool;
@@ -914,7 +918,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     function resetDataProvider() public returns (address){
         
         address _dataProvider = provider.getAddress("0x1");
-        require(aaveData != _dataProvider, "already set");
+        require(aaveData != _dataProvider, "AP::already set");
         aaveData = _dataProvider;
         
         return aaveData;
@@ -973,6 +977,11 @@ contract AavePartyMinionFactory is CloneFactory {
     uint256 public counter; // counter to prevent overwriting minions
     mapping(address => mapping(uint256 => address)) public ourMinions; //mapping minions to DAOs;
     
+    modifier ownerOnly() {
+        require(msg.sender == owner, "APFactory::only owner");
+        _;
+    }
+    
     event SummonAavePartyMinion(address partyAddress, address dao, address protocol, address feeAddress, uint256 minionId, uint256 feeFactor, string desc, string name);
     
     constructor(address _template)  {
@@ -990,7 +999,7 @@ contract AavePartyMinionFactory is CloneFactory {
             uint256 _minHealthFactor,
             string memory _desc) 
     external returns (address) {
-        require(isMember(_dao) || msg.sender == owner, "!member and !owner");
+        require(isMember(_dao) || msg.sender == owner, "APFactory:: not member and not owner");
         
         string memory name = "Aave Party Minion";
         uint256 minionId = counter ++;
@@ -1012,19 +1021,17 @@ contract AavePartyMinionFactory is CloneFactory {
         return shares > 0;
     }
     
-    function updateOwner(address _newOwner) external returns (address) {
-        require(msg.sender == owner, "only owner");
+    function updateOwner(address _newOwner) external ownerOnly returns (address) {
         owner = _newOwner;
         return owner;
     }
     
-    function updatePool(address _newPool) external {
-        require(msg.sender == owner, "only owner");
+    function updatePool(address _newPool) external ownerOnly {
         aavePool = _newPool;
     }
     
-    function updateData(address _newData) external {
-        require(msg.sender == owner, "only owner");
+    function updateData(address _newData) external ownerOnly {
+        require(msg.sender == owner, "APFactory::only owner");
         aaveData = _newData;
     }
     
