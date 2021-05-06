@@ -116,11 +116,11 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
     event LoanExecuted(uint256 proposalId);
     event ProposeCollateralWithdraw(uint256 proposalId, address proposer, address token, uint256 amount, address destination);
     event CollateralWithdrawExecuted(uint256 proposalId, uint256 amount);
-    event ProposeRepayLoan(uint256 proposalId, address proposer, address token, uint256 amount, address onBehalfOf);
+    event ProposeRepayLoan(uint256 proposalId, address proposer, address token, uint256 amount, uint256 rateMode, address onBehalfOf);
     event RepayLoanExecuted(uint256 proposalId);
     event WithdrawToDAO(uint256 proposalId, address proposer, address token, uint256 amount);
     event EarningsWithdraw(address member, address token, uint256 earnings, address destination);
-    event ProposeToggleEarnings(address token);
+    event ProposeToggleEarnings(uint256 proposalId, address proposer, address token);
     event EarningsToggled(uint256 proposalId, bool status);
     event WithdrawToMinion(address targetDao, address token, uint256 amount);
     event Canceled(uint256 proposalId, uint256 proposalType, string functionCaller);
@@ -387,7 +387,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         //Check health before collateral withdraw proposal
         require(isHealthy(), "AP::not healthy enough");
         //Check aTokens available is <= amount being withdrawn
-        require(aTokenBal <= amount, "AP::not enough tokens");
+        require(aTokenBal >= amount, "AP::not enough tokens");
         
         uint256 proposalId = proposeAction(
             token,
@@ -446,7 +446,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         });
 
         loanRepayments[proposalId] = repayment; 
-        emit ProposeRepayLoan(proposalId, msg.sender, token, amount, onBehalfOf);
+        emit ProposeRepayLoan(proposalId, msg.sender, token, amount, rateMode, onBehalfOf);
         return proposalId;
     }
     
@@ -702,7 +702,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
         });
         
         actions[proposalId] = action;
-        emit ProposeToggleEarnings(token);
+        emit ProposeToggleEarnings(proposalId, msg.sender, token);
         return proposalId;
     }
     
@@ -867,7 +867,7 @@ contract PoolPartyAaveMinion is ReentrancyGuard {
             return prod / totalShares;
         }
 
-        return shares * balance / totalShares;
+        return (balance / totalShares) * shares;
     }
     
     //  -- HELPER FUNCTIONS -- //
